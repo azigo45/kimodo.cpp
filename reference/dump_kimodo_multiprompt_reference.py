@@ -85,12 +85,29 @@ def main() -> None:
     sys.path.insert(0, str(upstream))
     from kimodo import load_model  # pylint: disable=import-outside-toplevel
 
+    # The NVIDIA PyTorch container enables TF32 globally.  Kimodo GGML uses
+    # F32 accumulation for reference parity, so a CUDA capture must disable
+    # Tensor Core TF32 before any model module is materialised.
+    if args.device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+        # TransformerEncoder otherwise selects PyTorch's CUDA fast path,
+        # whose fused attention reductions have a different F32 accumulation
+        # order from Kimodo's explicit GGML attention graph.
+        torch.backends.mha.set_fastpath_enabled(False)
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+
     torch.manual_seed(args.seed)
     encoder = CapturedEmbeddings(args.prompt, args.embedding)
     model, resolved = load_model("kimodo-smplx-rp", device=args.device,
                                  text_encoder=encoder, return_resolved_name=True)
     calls: list[dict[str, list[torch.Tensor] | torch.Tensor]] = []
     inverse_inputs: list[torch.Tensor] = []
+    root_calls: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]] = []
+    body_calls: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]] = []
     original_step = model.denoising_step
 
     def capture_step(*values: Any, **kwargs: Any) -> torch.Tensor:
@@ -109,6 +126,18 @@ def main() -> None:
         result = original_step(*values, **kwargs)
         call["output"].append(result.detach().clone())  # type: ignore[index]
         return result
+
+    def capture_stage(calls_for_stage: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]]):
+        def hook(_module: torch.nn.Module, values: tuple[Any, ...], output: torch.Tensor) -> None:
+            if not calls_for_stage:
+                calls_for_stage.append((
+                    tuple(value.detach().clone() for value in values if isinstance(value, torch.Tensor)),
+                    output.detach().clone(),
+                ))
+        return hook
+
+    root_hook = model.denoiser.model.root_model.register_forward_hook(capture_stage(root_calls))
+    body_hook = model.denoiser.model.body_model.register_forward_hook(capture_stage(body_calls))
 
     original_inverse = model.motion_rep.inverse
 
@@ -129,10 +158,17 @@ def main() -> None:
     finally:
         model.denoising_step = original_step
         model.motion_rep.inverse = original_inverse
-    if len(calls) != len(args.prompt) or not inverse_inputs:
+        root_hook.remove()
+        body_hook.remove()
+    if len(calls) != len(args.prompt) or not inverse_inputs or not root_calls or not body_calls:
         raise RuntimeError(f"expected {len(args.prompt)} segment trajectories, got {len(calls)}")
 
     arrays: dict[str, np.ndarray] = {"stitched_motion_rep": as_f32(inverse_inputs[-1])}
+    for stage, stage_calls in (("root", root_calls), ("body", body_calls)):
+        values, stage_output = stage_calls[0]
+        arrays[f"{stage}_output"] = as_f32(stage_output)
+        for index, value in enumerate(values):
+            arrays[f"{stage}_input_{index}"] = as_f32(value)
     for index, call in enumerate(calls):
         prefix = f"segment_{index:02d}_"
         for name in ("pad_mask", "text_features", "text_pad_mask", "first_heading_angle", "motion_mask", "observed_motion"):
@@ -158,6 +194,8 @@ def main() -> None:
         "transition_frames": args.transition_frames, "diffusion_steps": args.steps,
         "seed": args.seed, "cfg_type": "separated", "cfg_weight": [2.0, 2.0],
         "post_processing": False, "device": args.device, "torch": torch.__version__,
+        "cuda_tf32": torch.backends.cuda.matmul.allow_tf32 if args.device.startswith("cuda") else None,
+        "cuda_mha_fastpath": torch.backends.mha.get_fastpath_enabled() if args.device.startswith("cuda") else None,
         "python": platform.python_version(), "embedding_sources": [
             {"path": str(path), "sha256": sha256(path), "note": note}
             for path, note in zip(args.embedding, notes)
