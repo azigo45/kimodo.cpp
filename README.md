@@ -91,6 +91,12 @@ The GGUF bundle includes converted Meta Llama 3 material and Kimodo is
 non-commercial research-only. Review the published model card and upstream
 licences before downloading or redistributing.
 
+## License
+
+The C++ port and its original tooling are licensed under Apache-2.0; see
+[LICENSE](LICENSE). GGML and the model weights retain their respective
+licences.
+
 ### Regenerating the bundle
 
 This is only needed to reproduce a conversion. The SMPL-X checkpoint and Llama
