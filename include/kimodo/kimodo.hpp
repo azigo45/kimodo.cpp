@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +22,11 @@ struct motion_data {
     std::vector<float> root_positions;
 };
 
+struct prompt_segment {
+    std::string prompt;
+    unsigned frames = 0;
+};
+
 class KIMODO_API model {
 public:
     static std::expected<std::unique_ptr<model>, std::string> load(
@@ -32,6 +38,9 @@ public:
     std::expected<motion_data, std::string> generate_text(
         std::string_view utf8_prompt, unsigned frames, unsigned steps, std::uint64_t seed,
         float text_cfg, float constraint_cfg) const;
+    std::expected<motion_data, std::string> generate_text_sequence(
+        std::span<const prompt_segment> segments, unsigned transition_frames,
+        unsigned steps, std::uint64_t seed, float text_cfg, float constraint_cfg) const;
     ~model();
     model(const model &) = delete;
     model &operator=(const model &) = delete;

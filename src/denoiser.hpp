@@ -37,4 +37,13 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     const ggml_motion_weights &weights, std::span<const float> initial_noise,
     std::span<const float> embedding, std::size_t frames, unsigned steps,
     float text_weight, float constraint_weight);
+
+// Multi-prompt transition sampler. `observed` and `observed_mask` are [T,273]
+// normalized motion-representation values/masks. This mirrors the upstream
+// concat-mask denoiser: text, constraint, and unconditional CFG branches.
+std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditioned(
+    const ggml_motion_weights &weights, std::span<const float> initial_noise,
+    std::span<const float> embedding, std::span<const float> observed,
+    std::span<const float> observed_mask, float first_heading, std::size_t frames,
+    unsigned steps, float text_weight, float constraint_weight);
 }

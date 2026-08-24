@@ -219,38 +219,24 @@ func (g *gallery) worker() {
 				if len(segments) == 0 {
 					segments = []promptSegment{{Prompt: item.Prompt, Frames: item.Frames}}
 				}
-				segmentDirs := make([]string, 0, len(segments))
+				args := []string{model.Motion, g.text, "--sequence", fmt.Sprint(item.TransitionFrames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed), dir}
 				for index, segment := range segments {
-					g.mu.Lock()
-					item.Progress = fmt.Sprintf("Generating segment %d of %d", index+1, len(segments))
-					_ = g.save(item)
-					g.mu.Unlock()
-					segmentDir := filepath.Join(dir, fmt.Sprintf("segment-%02d", index+1))
-					if err = os.MkdirAll(segmentDir, 0755); err != nil {
-						break
-					}
-					promptPath := filepath.Join(segmentDir, "prompt.txt")
+					promptPath := filepath.Join(dir, fmt.Sprintf("segment-%02d.txt", index+1))
 					if err = os.WriteFile(promptPath, []byte(segment.Prompt), 0600); err != nil {
 						break
 					}
-					cmd := exec.Command(g.generator, model.Motion, g.text, promptPath, fmt.Sprint(segment.Frames), fmt.Sprint(item.DiffusionSteps), fmt.Sprint(item.Seed+uint64(index)), segmentDir)
+					args = append(args, fmt.Sprint(segment.Frames), promptPath)
+				}
+				if err == nil {
+					g.mu.Lock()
+					item.Progress = fmt.Sprintf("Generating %d conditioned segments", len(segments))
+					_ = g.save(item)
+					g.mu.Unlock()
+					cmd := exec.Command(g.generator, args...)
 					cmd.Env = append(os.Environ(), "KIMODO_BACKEND=vulkan")
 					output, runErr := cmd.CombinedOutput()
 					if runErr != nil {
-						err = fmt.Errorf("segment %d: %w: %s", index+1, runErr, strings.TrimSpace(string(output)))
-						break
-					}
-					segmentDirs = append(segmentDirs, segmentDir)
-				}
-				if err == nil && len(segmentDirs) > 1 {
-					err = stitchSegments(dir, segmentDirs, item.TransitionFrames)
-				}
-				if err == nil && len(segmentDirs) == 1 {
-					for _, name := range []string{"root_positions.f32", "local_rotations_xyzw.f32"} {
-						err = copyFile(filepath.Join(dir, name), filepath.Join(segmentDirs[0], name))
-						if err != nil {
-							break
-						}
+						err = fmt.Errorf("sequence: %w: %s", runErr, strings.TrimSpace(string(output)))
 					}
 				}
 			}

@@ -71,6 +71,9 @@ ggml_tensor *layer(ggml_context *ctx,ggml_tensor*x,const ggml_motion_weights&w,s
     a=linear(ctx,a,weight(w,s+"self_attn.out_proj.weight"),weight(w,s+"self_attn.out_proj.bias")); x=norm(ctx,ggml_add(ctx,x,a),weight(w,s+"norm1.weight"),weight(w,s+"norm1.bias")); auto*ff=linear(ctx,x,weight(w,s+"linear1.weight"),weight(w,s+"linear1.bias")); ff=ggml_gelu_erf(ctx,ff); ff=linear(ctx,ff,weight(w,s+"linear2.weight"),weight(w,s+"linear2.bias")); return norm(ctx,ggml_add(ctx,x,ff),weight(w,s+"norm2.weight"),weight(w,s+"norm2.bias"));
 }
 }
+std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser_conditioned(
+    const ggml_motion_weights &, std::span<const float>, std::span<const float>,
+    std::span<const float>, std::span<const float>, float, float, float, float, std::size_t);
 std::expected<std::vector<float>, std::string> run_motion_transformer(const ggml_motion_weights&w,std::string_view prefix,std::span<const float> motion,size_t motion_dim,std::span<const float> embedding,std::span<const float> timesteps,std::span<const float> headings,size_t batch,size_t frames) try {
     if(!batch||!frames||motion.size()!=batch*frames*motion_dim||embedding.size()!=batch*4096||timesteps.size()!=batch||headings.size()!=batch) return std::unexpected("invalid Transformer input dimensions");
     const int seq=prefix_tokens+static_cast<int>(frames); std::vector<float> text(batch*text_tokens*4096),time(batch*width),angle(batch*2),position(size_t(seq)*width);
@@ -115,12 +118,31 @@ std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser(
     const ggml_motion_weights &weights, std::span<const float> motion,
     std::span<const float> embedding, float timestep, float text_weight,
     float constraint_weight, std::size_t frames) {
+    const std::vector<float> empty(frames*273, 0.f);
+    return run_separated_cfg_denoiser_conditioned(weights, motion, embedding, empty, empty,
+                                                  timestep, 0.f, text_weight, constraint_weight, frames);
+}
+
+std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser_conditioned(
+    const ggml_motion_weights &weights, std::span<const float> motion,
+    std::span<const float> embedding, std::span<const float> observed,
+    std::span<const float> observed_mask, float timestep, float heading,
+    float text_weight, float constraint_weight, std::size_t frames) {
     if (motion.size()!=frames*273 || embedding.size()!=4096 || !std::isfinite(timestep) || !std::isfinite(text_weight) || !std::isfinite(constraint_weight))
         return std::unexpected("invalid separated CFG denoiser input");
-    constexpr size_t cfg_batch=3; std::vector<float> extended(cfg_batch*frames*546), text(cfg_batch*4096), times(cfg_batch,timestep), headings(cfg_batch), mask(cfg_batch*frames,1.f);
-    for(size_t b=0;b<cfg_batch;++b) for(size_t t=0;t<frames;++t) std::memcpy(extended.data()+(b*frames+t)*546,motion.data()+t*273,273*sizeof(float));
-    // Upstream order is text, constraint, unconditional.  No constraints
-    // means all motion-mask channels are zero; only batch zero has text.
+    if (observed.size()!=frames*273 || observed_mask.size()!=frames*273 || !std::isfinite(heading))
+        return std::unexpected("invalid separated CFG condition dimensions");
+    constexpr size_t cfg_batch=3; std::vector<float> extended(cfg_batch*frames*546), text(cfg_batch*4096), times(cfg_batch,timestep), headings(cfg_batch,heading), mask(cfg_batch*frames,1.f);
+    for(size_t b=0;b<cfg_batch;++b) for(size_t t=0;t<frames;++t) {
+        auto *dst=extended.data()+(b*frames+t)*546;
+        std::memcpy(dst,motion.data()+t*273,273*sizeof(float));
+        // Upstream separated CFG is [text, constraint, unconditional]. Only
+        // the constraint branch receives observed motion and its feature mask.
+        if (b==1) for (size_t d=0;d<273;++d) dst[d]=motion[t*273+d]*(1.f-observed_mask[t*273+d])+observed[t*273+d]*observed_mask[t*273+d];
+        if (b==1) std::memcpy(dst+273,observed_mask.data()+t*273,273*sizeof(float));
+    }
+    // Only branch zero has text. Branch one is constraint-only; branch two is
+    // unconditional. This is the upstream separated-CFG batch order.
     std::memcpy(text.data(),embedding.data(),4096*sizeof(float));
     auto all=run_two_stage_denoiser(weights,extended,text,times,headings,mask,cfg_batch,frames);
     if(!all)return std::unexpected(all.error());
@@ -138,6 +160,26 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());
     for(unsigned i=steps;i-->0;) {
         auto clean=run_separated_cfg_denoiser(weights,state,embedding,float(schedule->use_timesteps[i]),text_weight,constraint_weight,frames);
+        if(!clean)return std::unexpected(clean.error());
+        auto stepped=ddim_step(*schedule,i,state.data(),clean->data(),next.data(),state.size());
+        if(!stepped)return std::unexpected(stepped.error());
+        state.swap(next);
+    }
+    return state;
+}
+
+std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditioned(
+    const ggml_motion_weights &weights, std::span<const float> initial,
+    std::span<const float> embedding, std::span<const float> observed,
+    std::span<const float> observed_mask, float heading, std::size_t frames,
+    unsigned steps, float text_weight, float constraint_weight) {
+    if(initial.size()!=frames*273 || observed.size()!=initial.size() || observed_mask.size()!=initial.size())
+        return std::unexpected("invalid conditioned motion noise dimensions");
+    auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
+    std::vector<float> state(initial.begin(),initial.end()), next(state.size());
+    for(unsigned i=steps;i-->0;) {
+        auto clean=run_separated_cfg_denoiser_conditioned(weights,state,embedding,observed,observed_mask,
+                                                           float(schedule->use_timesteps[i]),heading,text_weight,constraint_weight,frames);
         if(!clean)return std::unexpected(clean.error());
         auto stepped=ddim_step(*schedule,i,state.data(),clean->data(),next.data(),state.size());
         if(!stepped)return std::unexpected(stepped.error());
