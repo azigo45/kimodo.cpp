@@ -26,9 +26,16 @@ window.addEventListener('load', async () => {
 
   const sequence = document.createElement('div');
   sequence.style.cssText = 'display:grid;gap:10px;width:100%';
-  prompt.before(sequence); sequence.append(prompt);
+  prompt.before(sequence);
   prompt.classList.add('sequence-prompt');
   const segmentControls = new Map();
+  const primaryRow = document.createElement('div');
+  primaryRow.style.cssText = 'display:grid;grid-template-columns:1fr 74px;gap:7px;align-items:start';
+  const primaryDuration = document.createElement('input');
+  primaryDuration.type = 'number'; primaryDuration.min = '60'; primaryDuration.max = '300'; primaryDuration.step = '30'; primaryDuration.value = '150';
+  primaryDuration.title = 'Frames (60–300)';
+  primaryRow.append(prompt, primaryDuration); sequence.append(primaryRow);
+  segmentControls.set(primaryRow, primaryDuration);
   const count = document.createElement('div'); count.className = 'hint';
   const updateCount = () => {
     const prompts = sequence.querySelectorAll('.sequence-prompt');
@@ -47,6 +54,29 @@ window.addEventListener('load', async () => {
   const add = document.createElement('button'); add.type = 'button'; add.textContent = '+ Add prompt segment';
   add.style.cssText = 'justify-self:start;padding:8px 12px;background:#24313a;color:#dce9e8';
   add.onclick = () => addSegment(); form.insertBefore(add, generate); form.insertBefore(count, generate); updateCount();
+
+  // The gallery owns the selected animation; receive its full saved sequence
+  // rather than restoring only animation.prompt (the first segment).
+  window.addEventListener('kimodo:restore-sequence', event => {
+    const {segments, model} = event.detail || {};
+    if (model && [...select.options].some(option => option.value === model)) {
+      select.value = model;
+      updateModel();
+    }
+    const restored = Array.isArray(segments) && segments.length
+      ? segments
+      : [{prompt: prompt.value, frames: 150}];
+    const first = restored[0];
+    prompt.value = first.prompt || '';
+    primaryDuration.value = String(first.frames || 150);
+    for (const row of [...sequence.children]) {
+      if (row !== primaryRow) row.remove();
+    }
+    for (const segment of restored.slice(1)) {
+      addSegment(segment.prompt || '', segment.frames || 150);
+    }
+    updateCount();
+  });
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = (input, init) => {
