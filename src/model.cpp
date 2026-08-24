@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <random>
 
 namespace kimodo {
@@ -120,11 +121,17 @@ std::expected<motion_data, std::string> model::generate_text_sequence(
             return std::unexpected("each sequence segment must contain a prompt and have 2..300 frames");
         if (index && transition_frames >= segment.frames) return std::unexpected("transition must be shorter than every following segment");
         auto embedding=impl_->text->encode(segment.prompt); if (!embedding) return std::unexpected(embedding.error());
-        std::vector<float> noise(static_cast<size_t>(segment.frames)*273); for (float &value : noise) value=normal(rng);
+        // NVIDIA's _multiprompt samples an additional conditioned prefix for
+        // every continuation.  That prefix replaces the old tail, leaving the
+        // caller-requested number of new frames after it is discarded.
+        const auto sampled_frames = static_cast<size_t>(segment.frames) +
+            (index == 0 ? 0 : transition_frames);
+        std::vector<float> noise(sampled_frames*273); for (float &value : noise) value=normal(rng);
         std::vector<float> current;
         if (index == 0) {
             auto sampled=detail::sample_motion_from_noise(*impl_->weights,noise,*embedding,segment.frames,steps,text_cfg,constraint_cfg);
-            if (!sampled) return std::unexpected(sampled.error()); current=std::move(*sampled);
+            if (!sampled) return std::unexpected(sampled.error());
+            current=std::move(*sampled);
         } else {
             // Derived from NVIDIA's Apache-2.0 `_multiprompt` sampler:
             // https://github.com/nv-tlabs/kimodo/blob/main/kimodo/model/kimodo_model.py
@@ -133,12 +140,18 @@ std::expected<motion_data, std::string> model::generate_text_sequence(
             std::vector<float> observed(noise.size()), observed_mask(noise.size());
             const auto overlap=static_cast<size_t>(transition_frames);
             const auto previous_start=previous.size()-overlap*273;
-            // FullBodyConstraintSet conditions smooth root, heading, local
-            // joint positions, and global rotations (203 values), but not
-            // generated velocities or contact labels.
+            // FullBodyConstraintSet's captured mask is deliberately sparse:
+            // global root/posed joints [0,71), smooth root [113,125), and
+            // global rotations [191,203).  In particular, the gaps contain
+            // generated velocities and must not be treated as observed.
+            constexpr std::array<std::pair<size_t, size_t>, 3> constrained = {{
+                {0, 71}, {113, 125}, {191, 203},
+            }};
             for (size_t frame=0; frame<overlap; ++frame) {
                 std::copy_n(previous.data()+previous_start+frame*273,203,observed.data()+frame*273);
-                std::fill_n(observed_mask.data()+frame*273,203,1.f);
+                for (const auto &[first, last] : constrained)
+                    std::fill(observed_mask.begin()+static_cast<std::ptrdiff_t>(frame*273+first),
+                              observed_mask.begin()+static_cast<std::ptrdiff_t>(frame*273+last), 1.f);
             }
             const float origin_x=observed[0]*(*gs)[0]+(*gm)[0];
             const float origin_z=observed[2]*(*gs)[2]+(*gm)[2];
@@ -149,11 +162,12 @@ std::expected<motion_data, std::string> model::generate_text_sequence(
             }
             const auto p=(previous.size()/273-overlap)*273;
             const float heading=std::atan2(previous[p+4]*(*gs)[4]+(*gm)[4],previous[p+3]*(*gs)[3]+(*gm)[3]);
-            auto sampled=detail::sample_motion_from_noise_conditioned(*impl_->weights,noise,*embedding,observed,observed_mask,heading,segment.frames,steps,text_cfg,constraint_cfg);
-            if (!sampled) return std::unexpected(sampled.error()); current=std::move(*sampled);
+            auto sampled=detail::sample_motion_from_noise_conditioned(*impl_->weights,noise,*embedding,observed,observed_mask,heading,sampled_frames,steps,text_cfg,constraint_cfg);
+            if (!sampled) return std::unexpected(sampled.error());
+            current=std::move(*sampled);
             // `_multiprompt` samples in the translated local coordinates, then
             // restores the prior segment's planar smooth-root origin.
-            for (size_t frame=0; frame<segment.frames; ++frame) {
+            for (size_t frame=0; frame<sampled_frames; ++frame) {
                 auto *row=current.data()+frame*273;
                 row[0]=((row[0]*(*gs)[0]+(*gm)[0])+origin_x)/(*gs)[0];
                 row[2]=((row[2]*(*gs)[2]+(*gm)[2])+origin_z)/(*gs)[2];

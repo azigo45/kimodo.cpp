@@ -384,7 +384,6 @@ func main() {
 		for _, segment := range request.Segments {
 			totalFrames += segment.Frames
 		}
-		totalFrames -= request.TransitionFrames * (len(request.Segments) - 1)
 		a := &animation{ID: token(), Prompt: request.Segments[0].Prompt, Frames: totalFrames, DiffusionSteps: request.Steps, Seed: request.Seed, CreatedAt: time.Now().UTC().Format(time.RFC3339), Status: "queued", Kind: "generated", Model: request.Model, Segments: request.Segments, TransitionFrames: request.TransitionFrames}
 		g.mu.Lock()
 		g.items[a.ID] = a

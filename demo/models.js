@@ -39,7 +39,7 @@ window.addEventListener('load', async () => {
   const count = document.createElement('div'); count.className = 'hint';
   const updateCount = () => {
     const prompts = sequence.querySelectorAll('.sequence-prompt');
-    count.textContent = `${prompts.length} segment${prompts.length === 1 ? '' : 's'} · 5-frame overlap`;
+    count.textContent = `${prompts.length} segment${prompts.length === 1 ? '' : 's'} · 5-frame conditioned hand-off`;
   };
   const addSegment = (text = '', frames = 150) => {
     const row = document.createElement('div'); row.style.cssText = 'display:grid;grid-template-columns:1fr 74px auto;gap:7px;align-items:start';
