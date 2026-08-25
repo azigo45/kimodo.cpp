@@ -9,6 +9,22 @@
 namespace kimodo::detail {
 class ggml_motion_weights;
 
+// One sequence segment with an already-encoded text condition and caller-
+// supplied initial noise. Continuation noise includes its transition prefix.
+struct sampled_sequence_segment {
+    std::span<const float> embedding;
+    std::span<const float> initial_noise;
+    std::size_t frames;
+};
+
+struct sequence_transition {
+    std::vector<float> observed;
+    std::vector<float> observed_mask;
+    float first_heading = 0.F;
+    float origin_x = 0.F;
+    float origin_z = 0.F;
+};
+
 // F32 TransformerEncoderBlock. Inputs/outputs are row-major [B,T,D], while
 // the implementation creates GGML [D,T,B] views over the same byte order.
 std::expected<std::vector<float>, std::string> run_motion_transformer(
@@ -46,4 +62,17 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float first_heading, std::size_t frames,
     unsigned steps, float text_weight, float constraint_weight);
+
+// End-to-end upstream `_multiprompt` orchestration.  DDIM operates in
+// normalized motion space; the returned joined representation is raw so its
+// translated roots and blended tail preserve upstream semantics.
+std::expected<std::vector<float>, std::string> sample_motion_sequence_from_noise(
+    const ggml_motion_weights &weights, std::span<const sampled_sequence_segment> segments,
+    unsigned transition_frames, unsigned steps, float text_weight, float constraint_weight);
+
+// Build the exact condition consumed by the next `_multiprompt` DDIM run.
+// Exposed for the raw fixture test as well as the runtime orchestrator.
+std::expected<sequence_transition, std::string> prepare_sequence_transition(
+    const ggml_motion_weights &weights, std::span<const float> previous,
+    std::size_t continuation_frames, unsigned transition_frames);
 }

@@ -19,7 +19,7 @@ from pathlib import Path
 
 ALIGNMENT = 32
 GGUF_MAGIC, GGUF_VERSION, GGML_TYPE_F32 = 0x46554747, 3, 0
-TYPE_UINT64, TYPE_STRING = 10, 8
+TYPE_UINT64, TYPE_STRING, TYPE_FLOAT32 = 10, 8, 6
 TYPE_UINT32 = 4
 
 @dataclass(frozen=True)
@@ -155,6 +155,9 @@ def metadata_uint(key: str, value: int) -> bytes:
 def metadata_uint32(key: str, value: int) -> bytes:
     return string(key) + struct.pack("<I", TYPE_UINT32) + struct.pack("<I", value)
 
+def metadata_float32(key: str, value: float) -> bytes:
+    return string(key) + struct.pack("<I", TYPE_FLOAT32) + struct.pack("<f", value)
+
 def tensor_info(tensor: Tensor, offset: int) -> bytes:
     # GGML stores dim 0 as the contiguous dimension. PyTorch F32 storage is
     # row-major, so reverse dimensions without changing the underlying bytes.
@@ -215,6 +218,8 @@ def main() -> None:
         metadata_uint("kimodo.num_text_tokens", 50),
         metadata_uint("kimodo.base_diffusion_steps", 1000),
         metadata_uint("kimodo.fps", 30),
+        # kimodo.motion_rep.stats.Stats uses sqrt(std**2 + eps).
+        metadata_float32("kimodo.normalization_epsilon", 1.0e-5),
     ]
     offsets, cursor = [], 0
     for tensor in tensors:

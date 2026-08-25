@@ -106,6 +106,9 @@ def main() -> None:
                                  text_encoder=encoder, return_resolved_name=True)
     calls: list[dict[str, list[torch.Tensor] | torch.Tensor]] = []
     inverse_inputs: list[torch.Tensor] = []
+    # The first inverse call decodes the tail of the preceding segment.  Keep
+    # its exact FK products as a transition-encoder oracle for native ports.
+    inverse_outputs: list[dict[str, torch.Tensor]] = []
     root_calls: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]] = []
     body_calls: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]] = []
     original_step = model.denoising_step
@@ -143,7 +146,13 @@ def main() -> None:
 
     def capture_inverse(motion: torch.Tensor, *values: Any, **kwargs: Any):
         inverse_inputs.append(motion.detach().clone())
-        return original_inverse(motion, *values, **kwargs)
+        result = original_inverse(motion, *values, **kwargs)
+        inverse_outputs.append({
+            key: value.detach().clone()
+            for key, value in result.items()
+            if isinstance(value, torch.Tensor)
+        })
+        return result
 
     model.motion_rep.inverse = capture_inverse
     model.denoising_step = capture_step
@@ -164,6 +173,14 @@ def main() -> None:
         raise RuntimeError(f"expected {len(args.prompt)} segment trajectories, got {len(calls)}")
 
     arrays: dict[str, np.ndarray] = {"stitched_motion_rep": as_f32(inverse_inputs[-1])}
+    # `_multiprompt` calls inverse on the preceding tail before creating the
+    # continuation constraints.  This is deliberately separate from the final
+    # output decode below, whose first five frames have already been blended.
+    if len(inverse_outputs) < 2:
+        raise RuntimeError("expected transition-tail and final inverse calls")
+    arrays["transition_source_motion"] = as_f32(inverse_inputs[0])
+    for key, value in inverse_outputs[0].items():
+        arrays["transition_source_" + key] = as_f32(value)
     for stage, stage_calls in (("root", root_calls), ("body", body_calls)):
         values, stage_output = stage_calls[0]
         arrays[f"{stage}_output"] = as_f32(stage_output)

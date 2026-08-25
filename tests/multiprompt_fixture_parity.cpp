@@ -5,6 +5,7 @@
 #include "ggml_weights.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -42,15 +43,23 @@ error compare(const std::vector<float> &actual, const std::vector<float> &expect
     return result;
 }
 
-void unnormalize(std::vector<float> &motion, const std::vector<float> &global_mean,
-                 const std::vector<float> &global_std, const std::vector<float> &body_mean,
-                 const std::vector<float> &body_std) {
-    for (std::size_t row = 0; row < motion.size() / features; ++row) {
-        auto *value = motion.data() + row * features;
-        for (std::size_t d = 0; d < 5; ++d) value[d] = value[d] * global_std[d] + global_mean[d];
-        for (std::size_t d = 0; d < 268; ++d) value[5 + d] = value[5 + d] * body_std[d] + body_mean[d];
+error compare_masked(const std::vector<float> &actual, const std::vector<float> &expected,
+                     const std::vector<float> &mask) {
+    if (actual.size() != expected.size() || actual.size() != mask.size())
+        throw std::runtime_error("masked fixture shape mismatch");
+    double squared_error = 0, squared_reference = 0;
+    error result;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (mask[i] == 0.F) continue;
+        const float difference = actual[i] - expected[i];
+        result.max_abs = std::max(result.max_abs, std::abs(difference));
+        squared_error += static_cast<double>(difference) * difference;
+        squared_reference += static_cast<double>(expected[i]) * expected[i];
     }
+    result.relative_l2 = std::sqrt(squared_error / squared_reference);
+    return result;
 }
+
 }
 
 int main(int argc, char **argv) try {
@@ -76,37 +85,50 @@ int main(int argc, char **argv) try {
     if (!second) throw std::runtime_error(second.error());
     const auto second_error = compare(*second, read(directory + "segment_01_sampling_output_001.f32"));
 
-    auto global_mean = (*weights)->f32_values("stats.global_root.mean");
-    auto global_std = (*weights)->f32_values("stats.global_root.std");
-    auto body_mean = (*weights)->f32_values("stats.body.mean");
-    auto body_std = (*weights)->f32_values("stats.body.std");
-    if (!global_mean || !global_std || !body_mean || !body_std) throw std::runtime_error("missing motion statistics");
-    auto stitched_first = *first;
-    auto stitched_second = *second;
-    unnormalize(stitched_first, *global_mean, *global_std, *body_mean, *body_std);
-    unnormalize(stitched_second, *global_mean, *global_std, *body_mean, *body_std);
-    constexpr std::size_t overlap = 5;
-    // The captured observed tensor is already translated to local origin;
-    // recover the world origin from the first segment's retained tail.
-    const float origin_x = stitched_first[(30 - overlap) * features];
-    const float origin_z = stitched_first[(30 - overlap) * features + 2];
-    for (std::size_t frame = 0; frame < 35; ++frame) {
-        stitched_second[frame * features] += origin_x;
-        stitched_second[frame * features + 2] += origin_z;
+    auto prior=read(directory + "segment_00_sampling_output_001.f32");
+    auto gm=(*weights)->f32_values("stats.global_root.mean"), gs=(*weights)->f32_values("stats.global_root.std");
+    auto bm=(*weights)->f32_values("stats.body.mean"), bs=(*weights)->f32_values("stats.body.std");
+    if (!gm || !gs || !bm || !bs) throw std::runtime_error("missing motion statistics");
+    auto scale=[](float stddev) { return std::sqrt(stddev*stddev+1.e-5F); };
+    for (std::size_t row=0;row<30;++row) { auto *v=prior.data()+row*features; for(std::size_t d=0;d<5;++d)v[d]=v[d]*scale((*gs)[d])+(*gm)[d]; for(std::size_t d=0;d<268;++d)v[5+d]=v[5+d]*scale((*bs)[d])+(*bm)[d]; }
+    const auto transition=kimodo::detail::prepare_sequence_transition(**weights,prior,30,5);
+    if (!transition) throw std::runtime_error(transition.error());
+    auto actual_observed=transition->observed;
+    for (std::size_t row=0;row<35;++row) { auto *v=actual_observed.data()+row*features; for(std::size_t d=0;d<5;++d)v[d]=(v[d]-(*gm)[d])/scale((*gs)[d]); for(std::size_t d=0;d<268;++d)v[5+d]=(v[5+d]-(*bm)[d])/scale((*bs)[d]); }
+    const auto expected_observed=read(directory + "segment_01_observed_motion.f32");
+    const auto expected_mask=read(directory + "segment_01_motion_mask.f32");
+    const auto observed_error=compare_masked(actual_observed,expected_observed,expected_mask);
+    std::size_t worst=0; float worst_value=0.F;
+    for (std::size_t i=0;i<expected_mask.size();++i) if (expected_mask[i] != 0.F) {
+        const float difference=std::abs(actual_observed[i]-expected_observed[i]);
+        if (difference>worst_value) { worst_value=difference; worst=i; }
     }
-    for (std::size_t frame = 0; frame < overlap; ++frame) {
-        const float alpha = 1.F - static_cast<float>(frame) / static_cast<float>(overlap - 1);
-        for (std::size_t d = 0; d < features; ++d)
-            stitched_first[(30 - overlap + frame) * features + d] =
-                alpha * stitched_first[(30 - overlap + frame) * features + d] +
-                (1.F - alpha) * stitched_second[frame * features + d];
-    }
-    stitched_first.insert(stitched_first.end(), stitched_second.begin() + static_cast<std::ptrdiff_t>(overlap * features), stitched_second.end());
-    const auto stitched_error = compare(stitched_first, read(directory + "stitched_motion_rep.f32"));
-    std::printf("segment0 max_abs=%g rel_l2=%g\nsegment1 max_abs=%g rel_l2=%g\nstitched max_abs=%g rel_l2=%g\n",
+    const auto mask_error=compare(transition->observed_mask,expected_mask);
+    const float heading_error=std::abs(transition->first_heading-heading.at(0));
+    const auto constructed_second=kimodo::detail::sample_motion_from_noise_conditioned(
+        **weights, read(directory + "segment_01_sampling_input_000.f32"),
+        read(directory + "segment_01_text_features.f32"), actual_observed, transition->observed_mask,
+        transition->first_heading, 35, 2, 2.F, 2.F);
+    if (!constructed_second) throw std::runtime_error(constructed_second.error());
+    const auto constructed_error=compare(*constructed_second,read(directory + "segment_01_sampling_output_001.f32"));
+    const auto first_noise=read(directory + "segment_00_sampling_input_000.f32");
+    const auto first_text=read(directory + "segment_00_text_features.f32");
+    const auto second_noise=read(directory + "segment_01_sampling_input_000.f32");
+    const auto second_text=read(directory + "segment_01_text_features.f32");
+    const std::array<kimodo::detail::sampled_sequence_segment, 2> segments{{
+        {first_text, first_noise, 30}, {second_text, second_noise, 30},
+    }};
+    const auto joined=kimodo::detail::sample_motion_sequence_from_noise(
+        **weights, segments, 5, 2, 2.F, 2.F);
+    if (!joined) throw std::runtime_error(joined.error());
+    const auto joined_error=compare(*joined,read(directory + "stitched_motion_rep.f32"));
+    std::printf("segment0 max_abs=%g rel_l2=%g\nsegment1 max_abs=%g rel_l2=%g\ntransition observed max_abs=%g worst=%zu mask max_abs=%g heading_abs=%g constructed max_abs=%g stitched max_abs=%g\n",
                 first_error.max_abs, first_error.relative_l2, second_error.max_abs, second_error.relative_l2,
-                stitched_error.max_abs, stitched_error.relative_l2);
-    return (first_error.max_abs <= 3.e-3F && second_error.max_abs <= 3.e-3F && stitched_error.max_abs <= 3.e-3F) ? 0 : 1;
+                observed_error.max_abs, worst, mask_error.max_abs, heading_error, constructed_error.max_abs,
+                joined_error.max_abs);
+    return (first_error.max_abs <= 3.e-3F && second_error.max_abs <= 3.e-3F &&
+            observed_error.max_abs <= 3.e-5F && mask_error.max_abs == 0.F && heading_error <= 2.e-3F &&
+            joined_error.max_abs <= 3.e-3F) ? 0 : 1;
 } catch (const std::exception &error) {
     std::fprintf(stderr, "multi-prompt fixture parity error: %s\n", error.what());
     return 1;

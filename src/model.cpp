@@ -9,7 +9,6 @@
 
 #include <cmath>
 #include <algorithm>
-#include <array>
 #include <random>
 
 namespace kimodo {
@@ -110,80 +109,38 @@ std::expected<motion_data, std::string> model::generate_text_sequence(
         if (!loaded) return std::unexpected(loaded.error());
         impl_->weights = std::move(*loaded);
     }
-    auto gm=impl_->weights->f32_values("stats.global_root.mean"), gs=impl_->weights->f32_values("stats.global_root.std");
     auto bm=impl_->weights->f32_values("stats.body.mean"), bs=impl_->weights->f32_values("stats.body.std");
+    auto gm=impl_->weights->f32_values("stats.global_root.mean"), gs=impl_->weights->f32_values("stats.global_root.std");
     if (!gm || !gs || !bm || !bs) return std::unexpected("motion GGUF lacks normalization statistics");
     std::mt19937_64 rng(seed); std::normal_distribution<float> normal(0.f, 1.f);
-    std::vector<float> joined, previous;
+    std::vector<std::array<float, embedding_width>> embeddings;
+    std::vector<std::vector<float>> noise;
+    std::vector<detail::sampled_sequence_segment> sampled;
+    embeddings.reserve(segments.size()); noise.reserve(segments.size()); sampled.reserve(segments.size());
     for (size_t index=0; index<segments.size(); ++index) {
         const auto &segment=segments[index];
         if (segment.prompt.empty() || segment.frames < 2 || segment.frames > 300)
             return std::unexpected("each sequence segment must contain a prompt and have 2..300 frames");
         if (index && transition_frames >= segment.frames) return std::unexpected("transition must be shorter than every following segment");
-        auto embedding=impl_->text->encode(segment.prompt); if (!embedding) return std::unexpected(embedding.error());
-        // NVIDIA's _multiprompt samples an additional conditioned prefix for
-        // every continuation.  That prefix replaces the old tail, leaving the
-        // caller-requested number of new frames after it is discarded.
+        auto embedding=impl_->text->encode(segment.prompt);
+        if (!embedding) return std::unexpected(embedding.error());
         const auto sampled_frames = static_cast<size_t>(segment.frames) +
             (index == 0 ? 0 : transition_frames);
-        std::vector<float> noise(sampled_frames*273); for (float &value : noise) value=normal(rng);
-        std::vector<float> current;
-        if (index == 0) {
-            auto sampled=detail::sample_motion_from_noise(*impl_->weights,noise,*embedding,segment.frames,steps,text_cfg,constraint_cfg);
-            if (!sampled) return std::unexpected(sampled.error());
-            current=std::move(*sampled);
-        } else {
-            // Derived from NVIDIA's Apache-2.0 `_multiprompt` sampler:
-            // https://github.com/nv-tlabs/kimodo/blob/main/kimodo/model/kimodo_model.py
-            // Preserve the prior tail as observed motion for the next DDIM
-            // run, then use its transition frames to replace the old tail.
-            std::vector<float> observed(noise.size()), observed_mask(noise.size());
-            const auto overlap=static_cast<size_t>(transition_frames);
-            const auto previous_start=previous.size()-overlap*273;
-            // FullBodyConstraintSet's captured mask is deliberately sparse:
-            // global root/posed joints [0,71), smooth root [113,125), and
-            // global rotations [191,203).  In particular, the gaps contain
-            // generated velocities and must not be treated as observed.
-            constexpr std::array<std::pair<size_t, size_t>, 3> constrained = {{
-                {0, 71}, {113, 125}, {191, 203},
-            }};
-            for (size_t frame=0; frame<overlap; ++frame) {
-                std::copy_n(previous.data()+previous_start+frame*273,203,observed.data()+frame*273);
-                for (const auto &[first, last] : constrained)
-                    std::fill(observed_mask.begin()+static_cast<std::ptrdiff_t>(frame*273+first),
-                              observed_mask.begin()+static_cast<std::ptrdiff_t>(frame*273+last), 1.f);
-            }
-            const float origin_x=observed[0]*(*gs)[0]+(*gm)[0];
-            const float origin_z=observed[2]*(*gs)[2]+(*gm)[2];
-            for (size_t frame=0; frame<overlap; ++frame) {
-                auto *row=observed.data()+frame*273;
-                row[0]=((row[0]*(*gs)[0]+(*gm)[0])-origin_x)/(*gs)[0];
-                row[2]=((row[2]*(*gs)[2]+(*gm)[2])-origin_z)/(*gs)[2];
-            }
-            const auto p=(previous.size()/273-overlap)*273;
-            const float heading=std::atan2(previous[p+4]*(*gs)[4]+(*gm)[4],previous[p+3]*(*gs)[3]+(*gm)[3]);
-            auto sampled=detail::sample_motion_from_noise_conditioned(*impl_->weights,noise,*embedding,observed,observed_mask,heading,sampled_frames,steps,text_cfg,constraint_cfg);
-            if (!sampled) return std::unexpected(sampled.error());
-            current=std::move(*sampled);
-            // `_multiprompt` samples in the translated local coordinates, then
-            // restores the prior segment's planar smooth-root origin.
-            for (size_t frame=0; frame<sampled_frames; ++frame) {
-                auto *row=current.data()+frame*273;
-                row[0]=((row[0]*(*gs)[0]+(*gm)[0])+origin_x)/(*gs)[0];
-                row[2]=((row[2]*(*gs)[2]+(*gm)[2])+origin_z)/(*gs)[2];
-            }
-            const auto start=joined.size()-overlap*273;
-            for (size_t frame=0; frame<overlap; ++frame) {
-                const float alpha=overlap==1?.5f:1.f-float(frame)/float(overlap-1);
-                for (size_t d=0; d<273; ++d) joined[start+frame*273+d]=alpha*joined[start+frame*273+d]+(1.f-alpha)*current[frame*273+d];
-            }
-            joined.insert(joined.end(),current.begin()+static_cast<std::ptrdiff_t>(overlap*273),current.end());
-        }
-        if (index == 0) joined=current;
-        previous=std::move(current);
+        embeddings.push_back(*embedding);
+        noise.emplace_back(sampled_frames*273);
+        for (float &value : noise.back()) value=normal(rng);
+        sampled.push_back({embeddings.back(), noise.back(), segment.frames});
     }
-    const auto frames=static_cast<unsigned>(joined.size()/273);
-    auto decoded=detail::decode_smplx22(joined,frames,*gm,*gs,*bm,*bs);
+    auto joined=detail::sample_motion_sequence_from_noise(*impl_->weights,sampled,transition_frames,steps,text_cfg,constraint_cfg);
+    if (!joined) return std::unexpected(joined.error());
+    const auto frames=static_cast<unsigned>(joined->size()/273);
+    auto normalized=*joined;
+    for (size_t row=0; row<frames; ++row) {
+        auto *value=normalized.data()+row*273;
+        for (size_t d=0; d<5; ++d) value[d]=(value[d]-(*gm)[d])/std::sqrt((*gs)[d]*(*gs)[d]+1.e-5F);
+        for (size_t d=0; d<268; ++d) value[5+d]=(value[5+d]-(*bm)[d])/std::sqrt((*bs)[d]*(*bs)[d]+1.e-5F);
+    }
+    auto decoded=detail::decode_smplx22(normalized,frames,*gm,*gs,*bm,*bs);
     if (!decoded) return std::unexpected(decoded.error());
     motion_data result; result.frames=frames; result.joints=22;
     result.local_rotations_xyzw=std::move(decoded->local_xyzw); result.root_positions=std::move(decoded->root_positions);
