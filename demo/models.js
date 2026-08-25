@@ -28,6 +28,13 @@ window.addEventListener('load', async () => {
   sequence.style.cssText = 'display:grid;gap:10px;width:100%';
   prompt.before(sequence);
   prompt.classList.add('sequence-prompt');
+  const autoGrow = area => {
+    area.style.height = '0px';
+    const minimum = Number.parseFloat(getComputedStyle(area).minHeight) || 0;
+    area.style.height = `${Math.max(minimum, area.scrollHeight)}px`;
+  };
+  prompt.style.minHeight = '110px';
+  prompt.addEventListener('input', () => autoGrow(prompt));
   const minFrames = 60, maxFrames = 150;
   const segmentControls = new Map();
   const validFrames = value => Number.isInteger(value) && value >= minFrames && value <= maxFrames;
@@ -44,6 +51,7 @@ window.addEventListener('load', async () => {
   configureDuration(primaryDuration, 150);
   primaryRow.append(prompt, primaryDuration); sequence.append(primaryRow);
   segmentControls.set(primaryRow, primaryDuration);
+  autoGrow(prompt);
   const count = document.createElement('div'); count.className = 'hint';
   const updateCount = () => {
     const prompts = sequence.querySelectorAll('.sequence-prompt');
@@ -52,11 +60,13 @@ window.addEventListener('load', async () => {
   const addSegment = (text = '', frames = 150) => {
     const row = document.createElement('div'); row.style.cssText = 'display:grid;grid-template-columns:1fr 74px auto;gap:7px;align-items:start';
     const textArea = document.createElement('textarea'); textArea.className = 'sequence-prompt'; textArea.value = text;
-    textArea.placeholder = 'Describe the next motion'; textArea.style.minHeight = '64px';
+    textArea.placeholder = 'Describe the next motion'; textArea.style.minHeight = '110px';
+    textArea.style.resize = 'none'; textArea.style.overflow = 'hidden'; textArea.addEventListener('input', () => autoGrow(textArea));
     const duration = document.createElement('input'); configureDuration(duration, frames);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Remove segment'; remove.style.cssText = 'padding:8px 12px;background:#24313a;color:#dce9e8';
     remove.onclick = () => { row.remove(); updateCount(); };
     row.append(textArea, duration, remove); sequence.append(row); segmentControls.set(row, duration);
+    autoGrow(textArea);
     updateCount();
   };
   const add = document.createElement('button'); add.type = 'button'; add.textContent = '+ Add prompt segment';
@@ -76,6 +86,7 @@ window.addEventListener('load', async () => {
       : [{prompt: prompt.value, frames: 150}];
     const first = restored[0];
     prompt.value = first.prompt || '';
+    autoGrow(prompt);
     primaryDuration.value = String(clampFrames(first.frames));
     for (const row of [...sequence.children]) {
       if (row !== primaryRow) row.remove();
@@ -103,4 +114,5 @@ window.addEventListener('load', async () => {
     }
     return nativeFetch(input, init);
   };
+  window.dispatchEvent(new Event('kimodo:sequence-controls-ready'));
 });
