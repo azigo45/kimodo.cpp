@@ -360,8 +360,8 @@ func main() {
 			if request.Segments[index].Frames == 0 {
 				request.Segments[index].Frames = 150
 			}
-			if request.Segments[index].Prompt == "" || len(request.Segments[index].Prompt) > 4096 || request.Segments[index].Frames < 60 || request.Segments[index].Frames > 300 {
-				http.Error(w, "each prompt segment must be 60..300 frames and 1..4096 bytes", 400)
+			if request.Segments[index].Prompt == "" || len(request.Segments[index].Prompt) > 4096 || request.Segments[index].Frames < 60 || request.Segments[index].Frames > 150 {
+				http.Error(w, "each prompt segment must be 60..150 frames and 1..4096 bytes", 400)
 				return
 			}
 		}

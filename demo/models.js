@@ -28,12 +28,20 @@ window.addEventListener('load', async () => {
   sequence.style.cssText = 'display:grid;gap:10px;width:100%';
   prompt.before(sequence);
   prompt.classList.add('sequence-prompt');
+  const minFrames = 60, maxFrames = 150;
   const segmentControls = new Map();
+  const validFrames = value => Number.isInteger(value) && value >= minFrames && value <= maxFrames;
+  const clampFrames = value => validFrames(Number(value)) ? Number(value) : Math.max(minFrames, Math.min(maxFrames, Number(value) || 150));
+  const configureDuration = (duration, frames) => {
+    duration.type = 'number'; duration.min = String(minFrames); duration.max = String(maxFrames); duration.step = '1'; duration.value = String(clampFrames(frames));
+    duration.title = `Frames (${minFrames}–${maxFrames})`;
+    duration.addEventListener('change', () => { duration.value = String(clampFrames(duration.value)); duration.setCustomValidity(''); });
+    duration.addEventListener('invalid', () => duration.setCustomValidity(`Use a whole number from ${minFrames} to ${maxFrames} frames.`));
+  };
   const primaryRow = document.createElement('div');
   primaryRow.style.cssText = 'display:grid;grid-template-columns:1fr 74px;gap:7px;align-items:start';
   const primaryDuration = document.createElement('input');
-  primaryDuration.type = 'number'; primaryDuration.min = '60'; primaryDuration.max = '300'; primaryDuration.step = '30'; primaryDuration.value = '150';
-  primaryDuration.title = 'Frames (60–300)';
+  configureDuration(primaryDuration, 150);
   primaryRow.append(prompt, primaryDuration); sequence.append(primaryRow);
   segmentControls.set(primaryRow, primaryDuration);
   const count = document.createElement('div'); count.className = 'hint';
@@ -45,7 +53,7 @@ window.addEventListener('load', async () => {
     const row = document.createElement('div'); row.style.cssText = 'display:grid;grid-template-columns:1fr 74px auto;gap:7px;align-items:start';
     const textArea = document.createElement('textarea'); textArea.className = 'sequence-prompt'; textArea.value = text;
     textArea.placeholder = 'Describe the next motion'; textArea.style.minHeight = '64px';
-    const duration = document.createElement('input'); duration.type = 'number'; duration.min = '60'; duration.max = '300'; duration.step = '30'; duration.value = String(frames); duration.title = 'Frames (60–300)';
+    const duration = document.createElement('input'); configureDuration(duration, frames);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Remove segment'; remove.style.cssText = 'padding:8px 12px;background:#24313a;color:#dce9e8';
     remove.onclick = () => { row.remove(); updateCount(); };
     row.append(textArea, duration, remove); sequence.append(row); segmentControls.set(row, duration);
@@ -68,12 +76,12 @@ window.addEventListener('load', async () => {
       : [{prompt: prompt.value, frames: 150}];
     const first = restored[0];
     prompt.value = first.prompt || '';
-    primaryDuration.value = String(first.frames || 150);
+    primaryDuration.value = String(clampFrames(first.frames));
     for (const row of [...sequence.children]) {
       if (row !== primaryRow) row.remove();
     }
     for (const segment of restored.slice(1)) {
-      addSegment(segment.prompt || '', segment.frames || 150);
+      addSegment(segment.prompt || '', clampFrames(segment.frames));
     }
     updateCount();
   });
@@ -87,7 +95,9 @@ window.addEventListener('load', async () => {
       body.segments = [...sequence.querySelectorAll('.sequence-prompt')].map(area => {
         const row = area.closest('div');
         const duration = segmentControls.get(row);
-        return {prompt: area.value, frames: Number(duration?.value || 150)};
+        const frames = Number(duration?.value);
+        if (!validFrames(frames)) throw new Error(`Each segment must be a whole number from ${minFrames} to ${maxFrames} frames.`);
+        return {prompt: area.value, frames};
       });
       return nativeFetch(input, {...init, body: JSON.stringify(body)});
     }
