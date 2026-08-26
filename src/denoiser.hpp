@@ -34,15 +34,15 @@ std::expected<std::vector<float>, std::string> run_motion_transformer(
     std::span<const float> headings, std::size_t batch, std::size_t frames);
 
 // Exact two-stage Kimodo denoiser for concatenated motion/mask inputs
-// [B,T,546].  Returned clean prediction is [B,T,273].
+// [B,T,2*motion_dim]. Returned clean prediction is [B,T,motion_dim].
 std::expected<std::vector<float>, std::string> run_two_stage_denoiser(
     const ggml_motion_weights &weights, std::span<const float> motion_and_mask,
     std::span<const float> text_embedding, std::span<const float> timesteps,
     std::span<const float> headings, std::span<const float> motion_mask,
     std::size_t batch, std::size_t frames);
 
-// Unconstrained separated CFG wrapper. `motion` is [T,273], embedding is
-// [4096], and the result is one clean [T,273] prediction.
+// Unconstrained separated CFG wrapper. `motion` is [T,motion_dim], embedding
+// is [4096], and the result is one clean prediction.
 std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser(
     const ggml_motion_weights &weights, std::span<const float> motion,
     std::span<const float> embedding, float timestep, float text_weight,
@@ -54,7 +54,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     std::span<const float> embedding, std::size_t frames, unsigned steps,
     float text_weight, float constraint_weight);
 
-// Multi-prompt transition sampler. `observed` and `observed_mask` are [T,273]
+// Multi-prompt transition sampler. `observed` and `observed_mask` are [T,motion_dim]
 // normalized motion-representation values/masks. This mirrors the upstream
 // concat-mask denoiser: text, constraint, and unconditional CFG branches.
 std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditioned(

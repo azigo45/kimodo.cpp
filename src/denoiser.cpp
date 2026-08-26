@@ -90,9 +90,10 @@ std::expected<std::vector<float>, std::string> run_two_stage_denoiser(
     std::span<const float> embedding, std::span<const float> timesteps,
     std::span<const float> headings, std::span<const float> mask,
     std::size_t batch, std::size_t frames) {
-    if (!batch || !frames || x.size()!=batch*frames*546 || mask.size()!=batch*frames)
+    const size_t dim=weights.motion_dim(), root_input_dim=2*dim, body_input_dim=2*dim-1;
+    if (!batch || !frames || !dim || x.size()!=batch*frames*root_input_dim || mask.size()!=batch*frames)
         return std::unexpected("invalid two-stage denoiser input dimensions");
-    auto root=run_motion_transformer(weights,"root_model.",x,546,embedding,timesteps,headings,batch,frames);
+    auto root=run_motion_transformer(weights,"root_model.",x,root_input_dim,embedding,timesteps,headings,batch,frames);
     if(!root)return std::unexpected(root.error());
     auto gm=weights.f32_values("stats.global_root.mean"), gs=weights.f32_values("stats.global_root.std"), lm=weights.f32_values("stats.local_root.mean"), ls=weights.f32_values("stats.local_root.std");
     if(!gm)return std::unexpected(gm.error());
@@ -101,16 +102,16 @@ std::expected<std::vector<float>, std::string> run_two_stage_denoiser(
     if(!ls)return std::unexpected(ls.error());
     auto local=global_root_to_local_root(*root,mask,batch,frames,*gm,*gs,*lm,*ls);
     if(!local)return std::unexpected(local.error());
-    std::vector<float> body_input(batch*frames*545);
+    std::vector<float> body_input(batch*frames*body_input_dim);
     for(std::size_t b=0;b<batch;++b) for(std::size_t t=0;t<frames;++t) {
-        const auto src=(b*frames+t)*546, dst=(b*frames+t)*545;
+        const auto src=(b*frames+t)*root_input_dim, dst=(b*frames+t)*body_input_dim;
         std::memcpy(body_input.data()+dst,local->data()+(b*frames+t)*4,4*sizeof(float));
-        std::memcpy(body_input.data()+dst+4,x.data()+src+5,541*sizeof(float));
+        std::memcpy(body_input.data()+dst+4,x.data()+src+5,(root_input_dim-5)*sizeof(float));
     }
-    auto body=run_motion_transformer(weights,"body_model.",body_input,545,embedding,timesteps,headings,batch,frames);
+    auto body=run_motion_transformer(weights,"body_model.",body_input,body_input_dim,embedding,timesteps,headings,batch,frames);
     if(!body)return std::unexpected(body.error());
-    std::vector<float> output(batch*frames*273);
-    for(std::size_t b=0;b<batch;++b)for(std::size_t t=0;t<frames;++t){const auto r=(b*frames+t)*5, q=(b*frames+t)*268, o=(b*frames+t)*273;std::memcpy(output.data()+o,root->data()+r,5*sizeof(float));std::memcpy(output.data()+o+5,body->data()+q,268*sizeof(float));}
+    std::vector<float> output(batch*frames*dim);
+    for(std::size_t b=0;b<batch;++b)for(std::size_t t=0;t<frames;++t){const auto r=(b*frames+t)*5, q=(b*frames+t)*(dim-5), o=(b*frames+t)*dim;std::memcpy(output.data()+o,root->data()+r,5*sizeof(float));std::memcpy(output.data()+o+5,body->data()+q,(dim-5)*sizeof(float));}
     return output;
 }
 
@@ -118,7 +119,7 @@ std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser(
     const ggml_motion_weights &weights, std::span<const float> motion,
     std::span<const float> embedding, float timestep, float text_weight,
     float constraint_weight, std::size_t frames) {
-    const std::vector<float> empty(frames*273, 0.f);
+    const std::vector<float> empty(frames*weights.motion_dim(), 0.f);
     return run_separated_cfg_denoiser_conditioned(weights, motion, embedding, empty, empty,
                                                   timestep, 0.f, text_weight, constraint_weight, frames);
 }
@@ -128,25 +129,26 @@ std::expected<std::vector<float>, std::string> run_separated_cfg_denoiser_condit
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float timestep, float heading,
     float text_weight, float constraint_weight, std::size_t frames) {
-    if (motion.size()!=frames*273 || embedding.size()!=4096 || !std::isfinite(timestep) || !std::isfinite(text_weight) || !std::isfinite(constraint_weight))
+    const size_t dim=weights.motion_dim();
+    if (!dim || motion.size()!=frames*dim || embedding.size()!=4096 || !std::isfinite(timestep) || !std::isfinite(text_weight) || !std::isfinite(constraint_weight))
         return std::unexpected("invalid separated CFG denoiser input");
-    if (observed.size()!=frames*273 || observed_mask.size()!=frames*273 || !std::isfinite(heading))
+    if (observed.size()!=frames*dim || observed_mask.size()!=frames*dim || !std::isfinite(heading))
         return std::unexpected("invalid separated CFG condition dimensions");
-    constexpr size_t cfg_batch=3; std::vector<float> extended(cfg_batch*frames*546), text(cfg_batch*4096), times(cfg_batch,timestep), headings(cfg_batch,heading), mask(cfg_batch*frames,1.f);
+    constexpr size_t cfg_batch=3; std::vector<float> extended(cfg_batch*frames*2*dim), text(cfg_batch*4096), times(cfg_batch,timestep), headings(cfg_batch,heading), mask(cfg_batch*frames,1.f);
     for(size_t b=0;b<cfg_batch;++b) for(size_t t=0;t<frames;++t) {
-        auto *dst=extended.data()+(b*frames+t)*546;
-        std::memcpy(dst,motion.data()+t*273,273*sizeof(float));
+        auto *dst=extended.data()+(b*frames+t)*2*dim;
+        std::memcpy(dst,motion.data()+t*dim,dim*sizeof(float));
         // Upstream separated CFG is [text, constraint, unconditional]. Only
         // the constraint branch receives observed motion and its feature mask.
-        if (b==1) for (size_t d=0;d<273;++d) dst[d]=motion[t*273+d]*(1.f-observed_mask[t*273+d])+observed[t*273+d]*observed_mask[t*273+d];
-        if (b==1) std::memcpy(dst+273,observed_mask.data()+t*273,273*sizeof(float));
+        if (b==1) for (size_t d=0;d<dim;++d) dst[d]=motion[t*dim+d]*(1.f-observed_mask[t*dim+d])+observed[t*dim+d]*observed_mask[t*dim+d];
+        if (b==1) std::memcpy(dst+dim,observed_mask.data()+t*dim,dim*sizeof(float));
     }
     // Only branch zero has text. Branch one is constraint-only; branch two is
     // unconditional. This is the upstream separated-CFG batch order.
     std::memcpy(text.data(),embedding.data(),4096*sizeof(float));
     auto all=run_two_stage_denoiser(weights,extended,text,times,headings,mask,cfg_batch,frames);
     if(!all)return std::unexpected(all.error());
-    std::vector<float> result(frames*273);
+    std::vector<float> result(frames*dim);
     for(size_t i=0;i<result.size();++i) result[i]=(*all)[2*result.size()+i]+text_weight*((*all)[i]-(*all)[2*result.size()+i])+constraint_weight*((*all)[result.size()+i]-(*all)[2*result.size()+i]);
     return result;
 }
@@ -155,7 +157,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     const ggml_motion_weights &weights, std::span<const float> initial,
     std::span<const float> embedding, std::size_t frames, unsigned steps,
     float text_weight, float constraint_weight) {
-    if(initial.size()!=frames*273) return std::unexpected("invalid initial motion noise dimensions");
+    if(initial.size()!=frames*weights.motion_dim()) return std::unexpected("invalid initial motion noise dimensions");
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());
     for(unsigned i=steps;i-->0;) {
@@ -173,7 +175,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float heading, std::size_t frames,
     unsigned steps, float text_weight, float constraint_weight) {
-    if(initial.size()!=frames*273 || observed.size()!=initial.size() || observed_mask.size()!=initial.size())
+    if(initial.size()!=frames*weights.motion_dim() || observed.size()!=initial.size() || observed_mask.size()!=initial.size())
         return std::unexpected("invalid conditioned motion noise dimensions");
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());

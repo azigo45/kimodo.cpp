@@ -5,6 +5,7 @@ window.addEventListener('load', async () => {
   const generate = document.querySelector('#generate');
   if (!prompt || !form || !generate) return;
   const models = await fetch('/api/models').then(r => r.json());
+  window.kimodoModels = models;
 
   const modelLabel = document.createElement('label');
   modelLabel.htmlFor = 'motionModel'; modelLabel.textContent = 'Motion model';
@@ -19,7 +20,14 @@ window.addEventListener('load', async () => {
   const modelHint = document.createElement('div'); modelHint.className = 'hint';
   const updateModel = () => {
     const model = models.find(item => item.id === select.value);
-    modelHint.textContent = model.available ? `${model.skeleton} · ${model.upstream}` : `${model.skeleton} · ${model.reason}`;
+    if (!model) return;
+    const title = document.querySelector('.eyebrow');
+    if (title) title.textContent = `${model.label} · Vulkan`;
+    modelHint.classList.toggle('license-warning', !model.commercial);
+    const terms = model.commercial ? 'commercial use permitted under NVIDIA Open Model License' : '⚠ non-commercial research use only';
+    const detail = model.available ? `${model.skeleton} · ${model.upstream} · ` : `${model.skeleton} · ${model.reason} · `;
+    const link = document.createElement('a'); link.href = model.license_url; link.target = '_blank'; link.rel = 'noreferrer'; link.textContent = terms;
+    modelHint.replaceChildren(document.createTextNode(detail), link);
   };
   select.onchange = updateModel;
   form.insertBefore(modelLabel, prompt); form.insertBefore(select, prompt); form.insertBefore(modelHint, prompt); updateModel();

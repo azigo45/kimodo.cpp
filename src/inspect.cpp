@@ -22,5 +22,5 @@ int main(int argc, char **argv) {
     }
     gguf_free(file); ggml_free(tensor_context);
 #endif
-    std::puts("Kimodo SMPL-X motion GGUF: valid (414 F32 tensors)");
+    std::puts("Kimodo motion GGUF: valid (414 F32 tensors)");
 }

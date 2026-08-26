@@ -1,4 +1,5 @@
 #include "gguf.hpp"
+#include "skeleton.hpp"
 
 #include <algorithm>
 #include <array>
@@ -106,8 +107,14 @@ std::expected<void, std::string> validate_motion_gguf(const gguf_file &file) {
     if (format == file.uints.end() || format->second != 1)
         return std::unexpected("unsupported Kimodo motion GGUF format");
     const auto skeleton = file.strings.find("kimodo.skeleton");
-    if (skeleton == file.strings.end() || skeleton->second != "smplx22")
-        return std::unexpected("first runtime supports only smplx22 skeletons");
+    if (skeleton == file.strings.end() || !find_skeleton(skeleton->second))
+        return std::unexpected("motion GGUF has an unsupported skeleton");
+    const auto &spec = *find_skeleton(skeleton->second);
+    const auto motion_dim = file.uints.find("kimodo.motion_dim");
+    const auto body_dim = file.uints.find("kimodo.body_dim");
+    if (motion_dim == file.uints.end() || motion_dim->second != spec.motion_dim() ||
+        body_dim == file.uints.end() || body_dim->second != spec.body_dim())
+        return std::unexpected("motion GGUF dimensions do not match its skeleton");
     const auto width = file.uints.find("kimodo.text_embedding_width");
     if (width == file.uints.end() || width->second != 4096)
         return std::unexpected("motion GGUF has incompatible text embedding width");

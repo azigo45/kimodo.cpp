@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert the Kimodo SMPL-X safetensors checkpoint to a self-describing GGUF.
+"""Convert a supported Kimodo motion safetensors checkpoint to GGUF.
 
 This converter deliberately implements only the safe safetensors and NPY
 formats.  It never imports torch, never deserializes pickle, and writes to a
@@ -21,6 +21,15 @@ ALIGNMENT = 32
 GGUF_MAGIC, GGUF_VERSION, GGML_TYPE_F32 = 0x46554747, 3, 0
 TYPE_UINT64, TYPE_STRING, TYPE_FLOAT32 = 10, 8, 6
 TYPE_UINT32 = 4
+
+MODEL_SPECS = {
+    "nvidia/Kimodo-SMPLX-RP-v1": ("smplx22", "SMPLXSkeleton22", 22, False,
+        "nvidia-internal-scientific-research-and-development-model-license"),
+    "nvidia/Kimodo-SOMA-RP-v1.1": ("soma30", "SOMASkeleton30", 30, True, "nvidia-open-model-license"),
+    "nvidia/Kimodo-SOMA-SEED-v1.1": ("soma30", "SOMASkeleton30", 30, True, "nvidia-open-model-license"),
+    "nvidia/Kimodo-G1-RP-v1": ("g1skel34", "G1Skeleton34", 34, True, "nvidia-open-model-license"),
+    "nvidia/Kimodo-G1-SEED-v1": ("g1skel34", "G1Skeleton34", 34, True, "nvidia-open-model-license"),
+}
 
 @dataclass(frozen=True)
 class Tensor:
@@ -183,7 +192,7 @@ def copy_range(dst, tensor: Tensor) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input", required=True, type=Path, help="downloaded Kimodo-SMPLX-RP-v1 directory")
+    p.add_argument("--input", required=True, type=Path, help="downloaded Kimodo model directory")
     p.add_argument("--output", required=True, type=Path)
     args = p.parse_args()
     root = args.input.resolve()
@@ -195,22 +204,33 @@ def main() -> None:
     for part in ("global_root", "local_root", "body"):
         for stat in ("mean", "std"):
             tensors.append(read_npy(root / "stats" / "motion" / part / f"{stat}.npy", f"stats.{part}.{stat}"))
-    revision = (root / "REVISION").read_text(encoding="utf-8").split()[0]
+    revision_fields = (root / "REVISION").read_text(encoding="utf-8").split()
+    if len(revision_fields) != 2 or revision_fields[1] not in MODEL_SPECS:
+        raise SystemExit("REVISION does not identify a supported official Kimodo model")
+    revision, model_id = revision_fields
+    skeleton, skeleton_class, joints, commercial, license_name = MODEL_SPECS[model_id]
+    config = (root / "config.yaml").read_text(encoding="utf-8")
+    if f"_target_: kimodo.skeleton.{skeleton_class}" not in config:
+        raise SystemExit("config.yaml skeleton does not match REVISION model identity")
+    motion_dim = 9 + 12 * joints
+    body_dim = motion_dim - 5
     meta = [
         metadata_string("general.architecture", "kimodo-motion"),
-        metadata_string("general.name", "Kimodo-SMPLX-RP-v1"),
+        metadata_string("general.name", model_id.removeprefix("nvidia/")),
         # GGML's own loader requires general.alignment to be UINT32.
         metadata_uint32("general.alignment", ALIGNMENT),
         metadata_uint("kimodo.format_version", 1),
-        metadata_string("kimodo.skeleton", "smplx22"),
-        metadata_string("kimodo.model_identity", f"nvidia/Kimodo-SMPLX-RP-v1@{revision}"),
+        metadata_string("kimodo.skeleton", skeleton),
+        metadata_string("kimodo.model_identity", f"{model_id}@{revision}"),
+        metadata_string("kimodo.license", license_name),
+        metadata_uint("kimodo.commercial_use", int(commercial)),
         metadata_string("kimodo.source_revision", revision),
         metadata_string("kimodo.source_sha256", sha256(ckpt)),
         metadata_uint("kimodo.text_embedding_width", 4096),
-        metadata_uint("kimodo.motion_dim", 273),
+        metadata_uint("kimodo.motion_dim", motion_dim),
         metadata_uint("kimodo.global_root_dim", 5),
         metadata_uint("kimodo.local_root_dim", 4),
-        metadata_uint("kimodo.body_dim", 268),
+        metadata_uint("kimodo.body_dim", body_dim),
         metadata_uint("kimodo.hidden_size", 1024),
         metadata_uint("kimodo.layers", 16),
         metadata_uint("kimodo.heads", 8),

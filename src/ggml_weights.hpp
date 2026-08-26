@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <expected>
 #include <memory>
 #include <string>
@@ -27,6 +28,9 @@ public:
     ggml_tensor *tensor(std::string_view name) const;
     std::expected<std::vector<float>, std::string> f32_values(std::string_view name) const;
     ggml_backend *backend() const noexcept { return backend_; }
+    std::string_view skeleton_key() const noexcept { return skeleton_; }
+    std::size_t motion_dim() const noexcept { return motion_dim_; }
+    std::size_t body_dim() const noexcept { return body_dim_; }
 
 private:
     ggml_motion_weights() = default;
@@ -34,6 +38,9 @@ private:
     gguf_context *gguf_ = nullptr;
     ggml_backend *backend_ = nullptr;
     ggml_backend_buffer *buffer_ = nullptr;
+    std::string skeleton_;
+    std::size_t motion_dim_ = 0;
+    std::size_t body_dim_ = 0;
 };
 
 } // namespace kimodo::detail

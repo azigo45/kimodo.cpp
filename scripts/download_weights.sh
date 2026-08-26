@@ -6,15 +6,17 @@ set -euo pipefail
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 
 usage() {
-  printf '%s\n' "usage: $0 --output DIR [--revision REVISION] [--with-text]" >&2
+  printf '%s\n' "usage: $0 --output DIR [--revision REVISION] [--model NAME]... [--with-text]" >&2
   exit 2
 }
 
 output='' revision='main' with_text=0
+models=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) [ "$#" -ge 2 ] || usage; output=$2; shift 2 ;;
     --revision) [ "$#" -ge 2 ] || usage; revision=$2; shift 2 ;;
+    --model) [ "$#" -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --with-text) with_text=1; shift ;;
     *) usage ;;
   esac
@@ -52,7 +54,18 @@ download() {
   printf '%s  %s\n' "$sha" "$repo" > "$target/REVISION"
 }
 
-download nvidia/Kimodo-SMPLX-RP-v1 Kimodo-SMPLX-RP-v1
+if [ "${#models[@]}" -eq 0 ]; then models=(smplx-rp-v1); fi
+for model in "${models[@]}"; do
+  case "$model" in
+    smplx-rp-v1) repo=nvidia/Kimodo-SMPLX-RP-v1; folder=Kimodo-SMPLX-RP-v1 ;;
+    soma-rp-v1.1) repo=nvidia/Kimodo-SOMA-RP-v1.1; folder=Kimodo-SOMA-RP-v1.1 ;;
+    soma-seed-v1.1) repo=nvidia/Kimodo-SOMA-SEED-v1.1; folder=Kimodo-SOMA-SEED-v1.1 ;;
+    g1-rp-v1) repo=nvidia/Kimodo-G1-RP-v1; folder=Kimodo-G1-RP-v1 ;;
+    g1-seed-v1) repo=nvidia/Kimodo-G1-SEED-v1; folder=Kimodo-G1-SEED-v1 ;;
+    *) echo "Unknown Kimodo model: $model" >&2; usage ;;
+  esac
+  download "$repo" "$folder"
+done
 if [ "$with_text" -eq 1 ]; then
   # The MNTP repo is a LoRA adapter, not the Llama base checkpoint.  Keep all
   # three identities separately so converter provenance cannot confuse them.

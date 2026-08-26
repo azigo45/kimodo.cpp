@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--checkpoint-dir", type=Path,
-                        help="local directory containing Kimodo-SMPLX-RP-v1; never download at capture time")
+                        help="local directory containing the selected Kimodo checkpoint; never download at capture time")
     parser.add_argument("--zero-embedding", action="store_true",
                         help="use a deterministic [1,1,4096] zero embedding; enables motion-only fixtures")
     parser.add_argument("--text-base", type=Path,
@@ -113,8 +113,21 @@ def main() -> None:
         raise SystemExit("--zero-embedding cannot be combined with real text model paths")
     if args.checkpoint_dir:
         checkpoint = args.checkpoint_dir.resolve()
-        if not (checkpoint / "Kimodo-SMPLX-RP-v1" / "config.yaml").is_file():
-            raise SystemExit("--checkpoint-dir must contain Kimodo-SMPLX-RP-v1/config.yaml")
+        model_folders = {
+            "kimodo-smplx-rp": "Kimodo-SMPLX-RP-v1",
+            "kimodo-smplx-rp-v1": "Kimodo-SMPLX-RP-v1",
+            "kimodo-soma-rp": "Kimodo-SOMA-RP-v1.1",
+            "kimodo-soma-rp-v1.1": "Kimodo-SOMA-RP-v1.1",
+            "kimodo-soma-seed": "Kimodo-SOMA-SEED-v1.1",
+            "kimodo-soma-seed-v1.1": "Kimodo-SOMA-SEED-v1.1",
+            "kimodo-g1-rp": "Kimodo-G1-RP-v1",
+            "kimodo-g1-rp-v1": "Kimodo-G1-RP-v1",
+            "kimodo-g1-seed": "Kimodo-G1-SEED-v1",
+            "kimodo-g1-seed-v1": "Kimodo-G1-SEED-v1",
+        }
+        folder = model_folders.get(args.model)
+        if folder is None or not (checkpoint / folder / "config.yaml").is_file():
+            raise SystemExit("--checkpoint-dir does not contain the selected official Kimodo model")
         # This is deliberately set only for the reference subprocess.  It
         # prevents a missing local model from silently falling back to HF.
         import os

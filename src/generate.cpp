@@ -41,7 +41,7 @@ int main(int argc, char **argv) try {
         const std::filesystem::path output(argv[7]); std::filesystem::create_directories(output);
         write_f32(output / "root_positions.f32", motion->root_positions);
         write_f32(output / "local_rotations_xyzw.f32", motion->local_rotations_xyzw);
-        std::cout << "generated " << motion->frames << " SMPL-X22 sequence frames\n";
+        std::cout << "generated " << motion->frames << " frames with " << motion->joints << " joints\n";
         return 0;
     }
     if (argc != 8) {
@@ -63,7 +63,7 @@ int main(int argc, char **argv) try {
     std::filesystem::create_directories(output);
     write_f32(output / "root_positions.f32", motion->root_positions);
     write_f32(output / "local_rotations_xyzw.f32", motion->local_rotations_xyzw);
-    std::cout << "generated " << motion->frames << " SMPL-X22 frames\n";
+    std::cout << "generated " << motion->frames << " frames with " << motion->joints << " joints\n";
     return 0;
 } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

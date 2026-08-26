@@ -61,6 +61,9 @@ std::expected<std::unique_ptr<ggml_motion_weights>, std::string> ggml_motion_wei
     if (!checked) return std::unexpected(checked.error());
     if (auto valid = validate_motion_gguf(*checked); !valid) return std::unexpected(valid.error());
     auto result = std::unique_ptr<ggml_motion_weights>(new ggml_motion_weights);
+    result->skeleton_ = checked->strings.at("kimodo.skeleton");
+    result->motion_dim_ = static_cast<size_t>(checked->uints.at("kimodo.motion_dim"));
+    result->body_dim_ = static_cast<size_t>(checked->uints.at("kimodo.body_dim"));
     gguf_init_params params{true, &result->context_};
     result->gguf_ = gguf_init_from_file(std::string(path).c_str(), params);
     if (!result->gguf_ || !result->context_) return std::unexpected("GGML could not load checked motion GGUF");

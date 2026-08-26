@@ -3,6 +3,7 @@
 #include "denoiser.hpp"
 #include "ggml_weights.hpp"
 #include "motion_decode.hpp"
+#include "skeleton.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -54,10 +55,11 @@ int main(int argc, char **argv) try {
     const std::filesystem::path fixture(argv[2]), output(argv[5]);
     const auto embedding = read_f32(fixture / "text_features.f32");
     const auto noise = read_f32(fixture / "sampling_initial_noise.f32");
-    if (embedding.size() != 4096 || noise.size() != frames * 273)
-        throw std::runtime_error("fixture does not match requested [1,1,4096] embedding and [1,T,273] noise");
     auto weights = kimodo::detail::ggml_motion_weights::load(argv[1]);
     if (!weights) throw std::runtime_error(weights.error());
+    const auto *skeleton=kimodo::detail::find_skeleton((*weights)->skeleton_key());
+    if (!skeleton || embedding.size() != 4096 || noise.size() != frames * skeleton->motion_dim())
+        throw std::runtime_error("fixture does not match the requested embedding and model motion dimensions");
     auto sampled = kimodo::detail::sample_motion_from_noise(**weights, noise, embedding, frames, steps, 2.f, 2.f);
     if (!sampled) throw std::runtime_error(sampled.error());
     auto gm = (**weights).f32_values("stats.global_root.mean");
@@ -65,7 +67,7 @@ int main(int argc, char **argv) try {
     auto bm = (**weights).f32_values("stats.body.mean");
     auto bs = (**weights).f32_values("stats.body.std");
     if (!gm || !gs || !bm || !bs) throw std::runtime_error("missing motion normalisation tensors");
-    auto decoded = kimodo::detail::decode_smplx22(*sampled, frames, *gm, *gs, *bm, *bs);
+    auto decoded = kimodo::detail::decode_motion(*sampled, frames, *skeleton, *gm, *gs, *bm, *bs);
     if (!decoded) throw std::runtime_error(decoded.error());
     std::filesystem::create_directories(output);
     write_f32(output / "sampling_final_state.f32", *sampled);

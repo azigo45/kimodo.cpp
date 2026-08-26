@@ -6,30 +6,31 @@ base_model_relation: quantized
 tags: [gguf, ggml, text-to-motion, smplx, kimodo]
 ---
 
-# Kimodo-SMPLX-RP-v1-GGML
+# Oops — Kimodo-SMPLX-RP-v1 is local-conversion only
 
-Native F32 GGML/GGUF conversion of
+The kimodo.cpp converter can produce a local F32 GGML/GGUF representation of
 [nvidia/Kimodo-SMPLX-RP-v1](https://huggingface.co/nvidia/Kimodo-SMPLX-RP-v1),
 the SMPL-X 22-joint text-and-constraint conditioned motion diffusion model.
-This repository contains only the diffusion model; its reusable Llama-derived
-text encoder is distributed separately as
-[`Llama-3-Kimodo-GGML`](https://huggingface.co/LocalAI-io/Llama-3-Kimodo-GGML).
+It is not a redistributable GGUF release.
 
-From a kimodo.cpp checkout with the Hugging Face CLI installed, install both with:
+We originally published the converted weights here, then noticed that the
+upstream NVIDIA Internal Scientific Research and Development Model License
+explicitly prohibits distributing derivative models. Oops. The GGUF, manifest,
+and checksums have therefore been removed; this card remains so that existing
+links explain what happened instead of becoming a mysterious 404.
 
-```sh
-scripts/download_gguf_weights.sh --output "$PWD"
-```
-
-The model is installed at `models/kimodo-smplx-rp-v1-f32.gguf`. Use
-`--motion-only` when supplying a precomputed LLM2Vec embedding.
+If someone at NVIDIA is willing to give LocalAI-io written permission to
+redistribute this checkpoint as GGML/GGUF, that would be very welcome. We would
+be happy to restore the conversion with its upstream provenance and verified
+parity results.
 
 ## Provenance and licence
 
-Converted by kimodo.cpp from upstream commit
-`1419ba56b734c48bbafb41fefa84088ca94583b5`. `MANIFEST.json` records the
-source revision and SHA-256 of the GGUF.
+The local converter targets upstream revision
+`1419ba56b734c48bbafb41fefa84088ca94583b5`.
 
-Kimodo-SMPLX-RP-v1 is for non-commercial research use only and remains subject
-to the [NVIDIA Internal Scientific Research and Development Model License](https://huggingface.co/nvidia/Kimodo-SMPLX-RP-v1).
-This conversion grants no additional rights.
+Kimodo-SMPLX-RP-v1 remains subject to the
+[NVIDIA Internal Scientific Research and Development Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-internal-scientific-research-and-development-model-license/).
+That licence limits the checkpoint and derivative models to internal,
+non-production R&D and prohibits their distribution. Converting the weights to
+GGUF does not grant additional rights.

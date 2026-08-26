@@ -51,13 +51,19 @@ type promptSegment struct {
 	Frames int    `json:"frames"`
 }
 type motionModel struct {
-	ID        string `json:"id"`
-	Label     string `json:"label"`
-	Skeleton  string `json:"skeleton"`
-	Upstream  string `json:"upstream"`
-	Available bool   `json:"available"`
-	Reason    string `json:"reason,omitempty"`
-	Motion    string `json:"-"`
+	ID          string       `json:"id"`
+	Label       string       `json:"label"`
+	Skeleton    string       `json:"skeleton"`
+	SkeletonKey string       `json:"skeleton_key"`
+	Upstream    string       `json:"upstream"`
+	License     string       `json:"license"`
+	LicenseURL  string       `json:"license_url"`
+	Commercial  bool         `json:"commercial"`
+	Available   bool         `json:"available"`
+	Reason      string       `json:"reason,omitempty"`
+	Parents     []int        `json:"parents"`
+	Offsets     [][3]float32 `json:"offsets"`
+	Motion      string       `json:"-"`
 }
 type gallery struct {
 	mu                      sync.RWMutex
@@ -94,14 +100,6 @@ func (g *gallery) list() []*animation {
 	return result
 }
 
-func copyFile(dst, src string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, b, 0600)
-}
-
 func readF32(path string) ([]float32, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -125,79 +123,159 @@ func writeF32(path string, values []float32) error {
 	return os.WriteFile(path, b, 0600)
 }
 
-func blendQuaternion(a, b []float32, alpha float32) {
-	dot := a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
-	if dot < 0 {
-		for i := range b {
-			b[i] = -b[i]
-		}
-	}
-	length := float32(0)
-	for i := range a {
-		a[i] = alpha*a[i] + (1-alpha)*b[i]
-		length += a[i] * a[i]
-	}
-	if length > 0 {
-		length = 1 / float32(math.Sqrt(float64(length)))
-		for i := range a {
-			a[i] *= length
-		}
-	}
+// Each motion is exported as a node-only GLB: it deliberately has no mesh or
+// skin, so consumers can attach their own Three.js geometry to the named
+// joints. Kimodo stores root translations and local XYZW rotations.
+var smplx22Parents = [...]int{-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19}
+var smplx22Names = [...]string{"pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee", "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot", "neck", "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"}
+var smplx22Offsets = [...][3]float32{{}, {.052299, -.093936, -.027607}, {-.057193, -.106548, -.022218}, {-.001496, .11293, -.024981}, {.058867, -.416442, -.006557}, {-.048074, -.39756, -.014061}, {.0069, .145636, -.006859}, {-.041738, -.437584, -.029512}, {.014489, -.446853, -.01803}, {-.010334, .056082, .021116}, {.049294, -.065279, .126259}, {-.040575, -.065287, .127076}, {-.011026, .171365, -.028827}, {.047725, .087643, -.008375}, {-.046636, .086612, -.014864}, {.024654, .175391, .024463}, {.126285, .05768, -.013885}, {-.109342, .053674, -.009118}, {.272907, -.069853, -.039094}, {-.292029, -.03544, -.024565}, {.276174, .021254, -.002478}, {-.271878, -.004835, -.016445}}
+
+type skeletonDefinition struct {
+	key     string
+	names   []string
+	parents []int
+	offsets [][3]float32
 }
 
-// stitchSegments joins independently sampled demo segments. The overlap is
-// blended in root space and by normalized linear interpolation for quaternions.
-// Native observed-motion conditioning is deliberately a later parity step.
-func stitchSegments(output string, dirs []string, overlap int) error {
-	var roots, rotations []float32
-	for index, dir := range dirs {
-		root, err := readF32(filepath.Join(dir, "root_positions.f32"))
-		if err != nil {
-			return err
-		}
-		rot, err := readF32(filepath.Join(dir, "local_rotations_xyzw.f32"))
-		if err != nil {
-			return err
-		}
-		frames := len(root) / 3
-		if frames == 0 || len(rot) != frames*22*4 {
-			return fmt.Errorf("invalid motion segment %d", index+1)
-		}
-		if index == 0 {
-			roots, rotations = root, rot
-			continue
-		}
-		n := overlap
-		if n > frames {
-			n = frames
-		}
-		if n > len(roots)/3 {
-			n = len(roots) / 3
-		}
-		for frame := 0; frame < n; frame++ {
-			alpha := float32(0.5)
-			if n > 1 {
-				alpha = 1 - float32(frame)/float32(n-1)
-			}
-			old := (len(roots)/3 - n + frame) * 3
-			newest := frame * 3
-			for axis := 0; axis < 3; axis++ {
-				roots[old+axis] = alpha*roots[old+axis] + (1-alpha)*root[newest+axis]
-			}
-			for joint := 0; joint < 22; joint++ {
-				oldQ := (len(rotations)/4 - n*22 + frame*22 + joint) * 4
-				newQ := (frame*22 + joint) * 4
-				blendQuaternion(rotations[oldQ:oldQ+4], append([]float32(nil), rot[newQ:newQ+4]...), alpha)
-			}
-		}
-		roots = append(roots, root[n*3:]...)
-		rotations = append(rotations, rot[n*22*4:]...)
+var skeletonDefinitions = map[string]skeletonDefinition{
+	"smplx22": {key: "smplx22", names: smplx22Names[:], parents: smplx22Parents[:], offsets: smplx22Offsets[:]},
+}
+
+type gltfBufferView struct {
+	Buffer     int `json:"buffer"`
+	ByteOffset int `json:"byteOffset,omitempty"`
+	ByteLength int `json:"byteLength"`
+}
+type gltfAccessor struct {
+	BufferView    int    `json:"bufferView"`
+	ComponentType int    `json:"componentType"`
+	Count         int    `json:"count"`
+	Type          string `json:"type"`
+}
+
+func appendF32(dst []byte, values []float32) []byte {
+	for _, value := range values {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], math.Float32bits(value))
+		dst = append(dst, b[:]...)
 	}
-	if err := writeF32(filepath.Join(output, "root_positions.f32"), roots); err != nil {
+	return dst
+}
+
+func writeSkeletonGLB(path string, roots, rotations []float32, skeleton skeletonDefinition) error {
+	frames := len(roots) / 3
+	joints := len(skeleton.parents)
+	if frames < 1 || joints < 1 || len(skeleton.names) != joints || len(skeleton.offsets) != joints || len(roots) != frames*3 || len(rotations) != frames*joints*4 {
+		return fmt.Errorf("invalid %s motion for GLB export", skeleton.key)
+	}
+	times := make([]float32, frames)
+	for i := range times {
+		times[i] = float32(i) / 30
+	}
+	bin := make([]byte, 0, (frames+frames*3+frames*22*4)*4)
+	views := make([]gltfBufferView, 0, 24)
+	addView := func(values []float32) int {
+		offset := len(bin)
+		bin = appendF32(bin, values)
+		views = append(views, gltfBufferView{Buffer: 0, ByteOffset: offset, ByteLength: len(bin) - offset})
+		return len(views) - 1
+	}
+	timeView, rootView := addView(times), addView(roots)
+	rotationViews := make([]int, joints)
+	for joint := range rotationViews {
+		track := make([]float32, frames*4)
+		for frame := 0; frame < frames; frame++ {
+			copy(track[frame*4:], rotations[(frame*joints+joint)*4:(frame*joints+joint+1)*4])
+		}
+		rotationViews[joint] = addView(track)
+	}
+	accessors := []gltfAccessor{{BufferView: timeView, ComponentType: 5126, Count: frames, Type: "SCALAR"}, {BufferView: rootView, ComponentType: 5126, Count: frames, Type: "VEC3"}}
+	for _, view := range rotationViews {
+		accessors = append(accessors, gltfAccessor{BufferView: view, ComponentType: 5126, Count: frames, Type: "VEC4"})
+	}
+	nodes := make([]map[string]any, joints)
+	for joint := range nodes {
+		node := map[string]any{"name": skeleton.names[joint]}
+		if joint != 0 {
+			node["translation"] = skeleton.offsets[joint]
+		}
+		children := make([]int, 0, 3)
+		for child, parent := range skeleton.parents {
+			if parent == joint {
+				children = append(children, child)
+			}
+		}
+		if len(children) != 0 {
+			node["children"] = children
+		}
+		nodes[joint] = node
+	}
+	samplers := make([]map[string]any, 0, 23)
+	channels := make([]map[string]any, 0, 23)
+	addChannel := func(node, output int, path string) {
+		samplers = append(samplers, map[string]any{"input": 0, "output": output, "interpolation": "LINEAR"})
+		channels = append(channels, map[string]any{"sampler": len(samplers) - 1, "target": map[string]any{"node": node, "path": path}})
+	}
+	addChannel(0, 1, "translation")
+	for joint := 0; joint < joints; joint++ {
+		addChannel(joint, joint+2, "rotation")
+	}
+	document := map[string]any{
+		"asset":       map[string]string{"version": "2.0", "generator": "kimodo.cpp skeleton exporter"},
+		"scene":       0,
+		"scenes":      []map[string]any{{"nodes": []int{0}}},
+		"nodes":       nodes,
+		"buffers":     []map[string]int{{"byteLength": len(bin)}},
+		"bufferViews": views,
+		"accessors":   accessors,
+		"animations":  []map[string]any{{"name": "KimodoMotion", "samplers": samplers, "channels": channels}},
+		"extras":      map[string]any{"skeleton": skeleton.key, "fps": 30, "rotation_order": "xyzw"},
+	}
+	jsonChunk, err := json.Marshal(document)
+	if err != nil {
 		return err
 	}
-	return writeF32(filepath.Join(output, "local_rotations_xyzw.f32"), rotations)
+	for len(jsonChunk)%4 != 0 {
+		jsonChunk = append(jsonChunk, ' ')
+	}
+	for len(bin)%4 != 0 {
+		bin = append(bin, 0)
+	}
+	total := 12 + 8 + len(jsonChunk) + 8 + len(bin)
+	out := make([]byte, 0, total)
+	putU32 := func(value uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], value)
+		out = append(out, b[:]...)
+	}
+	putU32(0x46546c67)
+	putU32(2)
+	putU32(uint32(total))
+	putU32(uint32(len(jsonChunk)))
+	putU32(0x4e4f534a)
+	out = append(out, jsonChunk...)
+	putU32(uint32(len(bin)))
+	putU32(0x004e4942)
+	out = append(out, bin...)
+	return os.WriteFile(path, out, 0600)
 }
+
+func exportSkeletonGLB(dir, skeletonKey string) error {
+	skeleton, ok := skeletonDefinitions[skeletonKey]
+	if !ok {
+		return fmt.Errorf("unsupported skeleton %q", skeletonKey)
+	}
+	roots, err := readF32(filepath.Join(dir, "root_positions.f32"))
+	if err != nil {
+		return err
+	}
+	rotations, err := readF32(filepath.Join(dir, "local_rotations_xyzw.f32"))
+	if err != nil {
+		return err
+	}
+	return writeSkeletonGLB(filepath.Join(dir, "animation.glb"), roots, rotations, skeleton)
+}
+
 func (g *gallery) worker() {
 	for id := range g.queue {
 		g.mu.Lock()
@@ -239,6 +317,9 @@ func (g *gallery) worker() {
 						err = fmt.Errorf("sequence: %w: %s", runErr, strings.TrimSpace(string(output)))
 					}
 				}
+				if err == nil {
+					err = exportSkeletonGLB(dir, model.SkeletonKey)
+				}
 			}
 		}
 		g.mu.Lock()
@@ -259,6 +340,10 @@ func (g *gallery) worker() {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8090", "listen address")
 	motion := flag.String("motion-model", "models/kimodo-smplx-rp-v1-f32.gguf", "motion GGUF")
+	somaRP := flag.String("soma-rp-model", "models/kimodo-soma-rp-v1.1-f32.gguf", "SOMA RP v1.1 motion GGUF")
+	somaSEED := flag.String("soma-seed-model", "models/kimodo-soma-seed-v1.1-f32.gguf", "SOMA SEED v1.1 motion GGUF")
+	g1RP := flag.String("g1-rp-model", "models/kimodo-g1-rp-v1-f32.gguf", "G1 RP v1 motion GGUF")
+	g1SEED := flag.String("g1-seed-model", "models/kimodo-g1-seed-v1-f32.gguf", "G1 SEED v1 motion GGUF")
 	text := flag.String("text-bundle", "generated/llm2vec-text-bundle", "native LLM2Vec component directory")
 	generator := flag.String("generator", "build/debug/kmd-generate", "native text-to-motion command")
 	output := flag.String("output", "demo-output", "persistent gallery directory")
@@ -266,12 +351,24 @@ func main() {
 	if err := os.MkdirAll(*output, 0755); err != nil {
 		log.Fatal(err)
 	}
+	makeModel := func(id, label, skeletonLabel, skeletonKey, upstream, license, licenseURL, path string, commercial bool) motionModel {
+		definition := skeletonDefinitions[skeletonKey]
+		model := motionModel{ID: id, Label: label, Skeleton: skeletonLabel, SkeletonKey: skeletonKey, Upstream: upstream, License: license, LicenseURL: licenseURL, Commercial: commercial, Parents: definition.parents, Offsets: definition.offsets, Motion: path}
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			model.Available = true
+		} else {
+			model.Reason = "GGUF not found at " + path
+		}
+		return model
+	}
+	const internalLicense = "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-internal-scientific-research-and-development-model-license/"
+	const openLicense = "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/"
 	models := map[string]motionModel{
-		"smplx-rp-v1":    {ID: "smplx-rp-v1", Label: "SMPL-X RP v1", Skeleton: "SMPL-X 22 joints", Upstream: "nvidia/Kimodo-SMPLX-RP-v1", Available: true, Motion: *motion},
-		"soma-rp-v1.1":   {ID: "soma-rp-v1.1", Label: "SOMA RP v1.1", Skeleton: "SOMA 30 joints", Upstream: "nvidia/Kimodo-SOMA-RP-v1.1", Reason: "SOMA decoder and GGML conversion are being added"},
-		"soma-seed-v1.1": {ID: "soma-seed-v1.1", Label: "SOMA SEED v1.1", Skeleton: "SOMA 30 joints", Upstream: "nvidia/Kimodo-SOMA-SEED-v1.1", Reason: "SOMA decoder and GGML conversion are being added"},
-		"g1-rp-v1":       {ID: "g1-rp-v1", Label: "G1 RP v1", Skeleton: "Unitree G1 34 joints", Upstream: "nvidia/Kimodo-G1-RP-v1", Reason: "G1 decoder and GGML conversion are being added"},
-		"g1-seed-v1":     {ID: "g1-seed-v1", Label: "G1 SEED v1", Skeleton: "Unitree G1 34 joints", Upstream: "nvidia/Kimodo-G1-SEED-v1", Reason: "G1 decoder and GGML conversion are being added"},
+		"smplx-rp-v1":    makeModel("smplx-rp-v1", "SMPL-X RP v1", "SMPL-X 22 joints", "smplx22", "nvidia/Kimodo-SMPLX-RP-v1", "NVIDIA Internal Scientific R&D (non-commercial)", internalLicense, *motion, false),
+		"soma-rp-v1.1":   makeModel("soma-rp-v1.1", "SOMA RP v1.1", "SOMA compact 30-joint control skeleton", "soma30", "nvidia/Kimodo-SOMA-RP-v1.1", "NVIDIA Open Model License", openLicense, *somaRP, true),
+		"soma-seed-v1.1": makeModel("soma-seed-v1.1", "SOMA SEED v1.1", "SOMA compact 30-joint control skeleton", "soma30", "nvidia/Kimodo-SOMA-SEED-v1.1", "NVIDIA Open Model License", openLicense, *somaSEED, true),
+		"g1-rp-v1":       makeModel("g1-rp-v1", "G1 RP v1", "Unitree G1 34 joints", "g1skel34", "nvidia/Kimodo-G1-RP-v1", "NVIDIA Open Model License", openLicense, *g1RP, true),
+		"g1-seed-v1":     makeModel("g1-seed-v1", "G1 SEED v1", "Unitree G1 34 joints", "g1skel34", "nvidia/Kimodo-G1-SEED-v1", "NVIDIA Open Model License", openLicense, *g1SEED, true),
 	}
 	g := &gallery{items: map[string]*animation{}, output: *output, queue: make(chan string, 32), generator: *generator, motion: *motion, text: *text, models: models}
 	entries, _ := filepath.Glob(filepath.Join(*output, "*.json"))
@@ -283,6 +380,15 @@ func main() {
 		var a animation
 		if json.Unmarshal(b, &a) == nil {
 			g.items[a.ID] = &a
+			if a.Status == "ready" {
+				model, ok := models[a.Model]
+				if !ok {
+					model = models["smplx-rp-v1"]
+				}
+				if err := exportSkeletonGLB(filepath.Join(*output, a.ID), model.SkeletonKey); err != nil && !os.IsNotExist(err) {
+					log.Printf("export existing animation %s: %v", a.ID, err)
+				}
+			}
 		}
 	}
 	go g.worker()
@@ -400,7 +506,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/animations/", func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/animations/"), "/")
-		if len(parts) != 2 || (parts[1] != "root.f32" && parts[1] != "rotations.f32") {
+		if len(parts) != 2 || (parts[1] != "root.f32" && parts[1] != "rotations.f32" && parts[1] != "animation.glb") {
 			http.NotFound(w, r)
 			return
 		}
@@ -415,7 +521,23 @@ func main() {
 		if parts[1] == "rotations.f32" {
 			name = "local_rotations_xyzw.f32"
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		if parts[1] == "animation.glb" {
+			name = "animation.glb"
+			w.Header().Set("Content-Type", "model/gltf-binary")
+			w.Header().Set("Content-Disposition", "attachment; filename=kimodo-"+a.ID+".glb")
+			// A GLB is a compact asset; read it directly so browsers always receive
+			// it as a download rather than invoking any path-cleaning redirects.
+			data, err := os.ReadFile(filepath.Join(g.output, a.ID, name))
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			_, _ = w.Write(data)
+			return
+		} else {
+			w.Header().Set("Content-Type", "application/octet-stream")
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, filepath.Join(g.output, a.ID, name))
 	})

@@ -4,19 +4,20 @@ set -euo pipefail
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 
 ORG="${GGUF_ORG:-LocalAI-io}"
-MOTION_REPO_DEFAULT="$ORG/Kimodo-SMPLX-RP-v1-GGML"
 TEXT_REPO_DEFAULT="$ORG/Llama-3-Kimodo-GGML"
 
 usage() {
-    printf '%s\n' "usage: $0 --output DIR [--motion-repo HF_REPO] [--text-repo HF_REPO] [--revision REVISION] [--motion-only]" >&2
+    printf '%s\n' "usage: $0 --output DIR [--model MODEL]... [--motion-repo HF_REPO] [--text-repo HF_REPO] [--revision REVISION] [--motion-only]" >&2
+    printf '%s\n' "models: soma-rp-v1.1, soma-seed-v1.1, g1-rp-v1, g1-seed-v1" >&2
     exit 2
 }
 
-output='' motion_repo="$MOTION_REPO_DEFAULT" text_repo="$TEXT_REPO_DEFAULT" revision='main' motion_only=0
+output='' motion_repo_override='' text_repo="$TEXT_REPO_DEFAULT" revision='main' motion_only=0 models=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output) [ "$#" -ge 2 ] || usage; output=$2; shift 2 ;;
-        --motion-repo) [ "$#" -ge 2 ] || usage; motion_repo=$2; shift 2 ;;
+        --model) [ "$#" -ge 2 ] || usage; models+=("$2"); shift 2 ;;
+        --motion-repo) [ "$#" -ge 2 ] || usage; motion_repo_override=$2; shift 2 ;;
         --text-repo) [ "$#" -ge 2 ] || usage; text_repo=$2; shift 2 ;;
         --revision) [ "$#" -ge 2 ] || usage; revision=$2; shift 2 ;;
         --motion-only) motion_only=1; shift ;;
@@ -25,6 +26,8 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$output" ] || usage
 command -v hf >/dev/null || { echo "hf not found; enter the Nix shell first" >&2; exit 1; }
+[ "${#models[@]}" -gt 0 ] || models=(soma-rp-v1.1)
+[ -z "$motion_repo_override" ] || [ "${#models[@]}" -eq 1 ] || { echo "--motion-repo requires exactly one --model" >&2; exit 2; }
 
 mkdir -p "$output"
 
@@ -70,7 +73,17 @@ print("verified native Kimodo GGUF bundle")
 PY
 }
 
-download_and_verify "$motion_repo" "models/kimodo-smplx-rp-v1-f32.gguf"
+for model in "${models[@]}"; do
+    case "$model" in
+        soma-rp-v1.1) motion_repo="$ORG/Kimodo-SOMA-RP-v1.1-GGML"; motion_file='models/kimodo-soma-rp-v1.1-f32.gguf' ;;
+        soma-seed-v1.1) motion_repo="$ORG/Kimodo-SOMA-SEED-v1.1-GGML"; motion_file='models/kimodo-soma-seed-v1.1-f32.gguf' ;;
+        g1-rp-v1) motion_repo="$ORG/Kimodo-G1-RP-v1-GGML"; motion_file='models/kimodo-g1-rp-v1-f32.gguf' ;;
+        g1-seed-v1) motion_repo="$ORG/Kimodo-G1-SEED-v1-GGML"; motion_file='models/kimodo-g1-seed-v1-f32.gguf' ;;
+        *) echo "unknown motion model: $model" >&2; usage ;;
+    esac
+    [ -z "$motion_repo_override" ] || motion_repo=$motion_repo_override
+    download_and_verify "$motion_repo" "$motion_file"
+done
 if [ "$motion_only" -eq 0 ]; then
     download_and_verify "$text_repo" "generated/llm2vec-text-bundle/*"
 fi
