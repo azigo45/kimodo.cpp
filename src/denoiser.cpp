@@ -1,3 +1,6 @@
+// Modified by Alexander Antonov (AzRigTool), 2026: project_observed hard pinning,
+// fractional (weighted) observation masks, and one denoiser graph per step in
+// place of eighteen. Original: kimodo.cpp, Apache-2.0. See the fork's history.
 #include "denoiser.hpp"
 #include "ggml_weights.hpp"
 #include "motion_rep.hpp"

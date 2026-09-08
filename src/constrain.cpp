@@ -1,3 +1,6 @@
+// Copyright 2026 Alexander Antonov (AzRigTool).
+// Licensed under the Apache License, Version 2.0 - see LICENSE in this repository.
+//
 // Pose-constrained generation.
 //
 // The motion model is a diffusion model, and `sample_motion_from_noise_conditioned`

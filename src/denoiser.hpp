@@ -1,3 +1,5 @@
+// Modified by Alexander Antonov (AzRigTool), 2026: project_observed parameter on
+// sample_motion_from_noise_conditioned. Original: kimodo.cpp, Apache-2.0.
 #pragma once
 
 #include <cstddef>

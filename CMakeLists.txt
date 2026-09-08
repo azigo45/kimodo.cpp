@@ -1,3 +1,5 @@
+# Modified by Alexander Antonov (AzRigTool), 2026: adds the kmd-constrain target.
+# Original: kimodo.cpp, Apache-2.0.
 cmake_minimum_required(VERSION 3.25)
 project(kimodo LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
