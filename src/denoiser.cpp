@@ -28,8 +28,8 @@ ggml_tensor *linear(ggml_context *ctx, ggml_tensor *x, ggml_tensor *w, ggml_tens
 ggml_tensor *norm(ggml_context *ctx, ggml_tensor *x, ggml_tensor *scale, ggml_tensor *bias) {
     auto *n=ggml_norm(ctx,x,1.e-5f); return ggml_add(ctx,ggml_mul(ctx,n,ggml_repeat(ctx,scale,n)),ggml_repeat(ctx,bias,n));
 }
-std::expected<std::vector<float>,std::string> execute(ggml_context *ctx, ggml_tensor *out, size_t values, ggml_backend_t backend) {
-    auto *graph=ggml_new_graph(ctx); ggml_build_forward_expand(graph,out);
+std::expected<std::vector<float>,std::string> execute(ggml_context *ctx, ggml_tensor *out, size_t values, ggml_backend_t backend, size_t graph_size=GGML_DEFAULT_GRAPH_SIZE) {
+    auto *graph=ggml_new_graph_custom(ctx,graph_size,false); ggml_build_forward_expand(graph,out);
     auto alloc=ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if(!alloc || !ggml_gallocr_reserve(alloc,graph) || !ggml_gallocr_alloc_graph(alloc,graph)) return std::unexpected("GGML graph allocation failed");
     for(const auto &[t,data]:inputs) ggml_backend_tensor_set(t,data.data(),0,data.size()*sizeof(float));
@@ -80,10 +80,34 @@ std::expected<std::vector<float>, std::string> run_motion_transformer(const ggml
     const int seq=prefix_tokens+static_cast<int>(frames); std::vector<float> text(batch*text_tokens*4096),time(batch*width),angle(batch*2),position(size_t(seq)*width);
     for(size_t b=0;b<batch;++b) { std::memcpy(text.data()+b*text_tokens*4096,embedding.data()+b*4096,4096*sizeof(float)); for(int d=0;d<width;d+=2){float z=timesteps[b]*std::pow(10000.f,-float(d)/width);time[b*width+d]=std::sin(z);time[b*width+d+1]=std::cos(z);} angle[2*b]=std::cos(headings[b]);angle[2*b+1]=std::sin(headings[b]); }
     for(int s=0;s<seq;++s)for(int d=0;d<width;d+=2){float z=float(s)*std::pow(10000.f,-float(d)/width);position[size_t(s)*width+d]=std::sin(z);position[size_t(s)*width+d+1]=std::cos(z);}
-    const std::string p(prefix); std::vector<float> state;
-    { auto*ctx=ggml_init({128ULL*1024*1024,nullptr,true}); if(!ctx)return std::unexpected("GGML context allocation failed"); auto*m=linear(ctx,input(ctx,motion,int(motion_dim),int(frames),int(batch)),weight(w,p+"input_linear.weight"),weight(w,p+"input_linear.bias")); auto*te=linear(ctx,input(ctx,text,4096,text_tokens,int(batch)),weight(w,p+"embed_text.weight"),weight(w,p+"embed_text.bias")); auto*ti=linear(ctx,input(ctx,time,width,1,int(batch)),weight(w,p+"embed_timestep.time_embed.0.weight"),weight(w,p+"embed_timestep.time_embed.0.bias"));ti=linear(ctx,ggml_silu(ctx,ti),weight(w,p+"embed_timestep.time_embed.2.weight"),weight(w,p+"embed_timestep.time_embed.2.bias"));auto*he=linear(ctx,input(ctx,angle,2,1,int(batch)),weight(w,p+"linear_first_heading_angle.weight"),weight(w,p+"linear_first_heading_angle.bias"));auto*x=ggml_concat(ctx,ggml_concat(ctx,ggml_concat(ctx,te,ti,1),he,1),m,1);auto*pos=input(ctx,position,width,seq,1);x=ggml_add(ctx,x,ggml_repeat(ctx,pos,x));auto r=execute(ctx,x,size_t(width)*seq*batch,w.backend());ggml_free(ctx);if(!r)return std::unexpected(r.error());state=std::move(*r); }
-    for(int i=0;i<16;++i){auto*ctx=ggml_init({128ULL*1024*1024,nullptr,true});if(!ctx)return std::unexpected("GGML context allocation failed");auto*x=layer(ctx,input(ctx,state,width,seq,int(batch)),w,p+"seqTransEncoder.layers."+std::to_string(i)+".",seq,int(batch));auto r=execute(ctx,x,size_t(width)*seq*batch,w.backend());ggml_free(ctx);if(!r)return std::unexpected(r.error());state=std::move(*r);}
-    auto*ctx=ggml_init({32ULL*1024*1024,nullptr,true});if(!ctx)return std::unexpected("GGML context allocation failed");auto*all=input(ctx,state,width,seq,int(batch));auto*part=ggml_view_3d(ctx,all,width,frames,batch,all->nb[1],all->nb[2],size_t(prefix_tokens)*width*sizeof(float));part=ggml_cont(ctx,part);auto*y=linear(ctx,part,weight(w,p+"output_linear.weight"),weight(w,p+"output_linear.bias"));const size_t outdim=size_t(weight(w,p+"output_linear.bias")->ne[0]);auto r=execute(ctx,y,outdim*frames*batch,w.backend());ggml_free(ctx);return r;
+    const std::string p(prefix);
+    // One graph for the whole transformer.  Splitting it per block cost a
+    // Vulkan buffer allocation, a host round-trip and a full pipeline drain
+    // eighteen times over - 720 drains in a 20-step solve, which is why the
+    // GPU sat at a third of its capacity while the wall clock was linear in
+    // steps.  The operators and their order are unchanged, so the result is
+    // bit-identical; only the fences between them are gone.
+    auto *ctx=ggml_init({256ULL*1024*1024,nullptr,true});
+    if(!ctx)return std::unexpected("GGML context allocation failed");
+    auto*m=linear(ctx,input(ctx,motion,int(motion_dim),int(frames),int(batch)),weight(w,p+"input_linear.weight"),weight(w,p+"input_linear.bias"));
+    auto*te=linear(ctx,input(ctx,text,4096,text_tokens,int(batch)),weight(w,p+"embed_text.weight"),weight(w,p+"embed_text.bias"));
+    auto*ti=linear(ctx,input(ctx,time,width,1,int(batch)),weight(w,p+"embed_timestep.time_embed.0.weight"),weight(w,p+"embed_timestep.time_embed.0.bias"));
+    ti=linear(ctx,ggml_silu(ctx,ti),weight(w,p+"embed_timestep.time_embed.2.weight"),weight(w,p+"embed_timestep.time_embed.2.bias"));
+    auto*he=linear(ctx,input(ctx,angle,2,1,int(batch)),weight(w,p+"linear_first_heading_angle.weight"),weight(w,p+"linear_first_heading_angle.bias"));
+    auto*x=ggml_concat(ctx,ggml_concat(ctx,ggml_concat(ctx,te,ti,1),he,1),m,1);
+    auto*pos=input(ctx,position,width,seq,1);
+    x=ggml_add(ctx,x,ggml_repeat(ctx,pos,x));
+    for(int i=0;i<16;++i)
+        x=layer(ctx,x,w,p+"seqTransEncoder.layers."+std::to_string(i)+".",seq,int(batch));
+    // The block boundary used to re-upload the state as a fresh contiguous
+    // tensor; keep that property so the view below sees the same strides.
+    x=ggml_cont(ctx,x);
+    auto*part=ggml_cont(ctx,ggml_view_3d(ctx,x,width,frames,batch,x->nb[1],x->nb[2],size_t(prefix_tokens)*width*sizeof(float)));
+    auto*y=linear(ctx,part,weight(w,p+"output_linear.weight"),weight(w,p+"output_linear.bias"));
+    const size_t outdim=size_t(weight(w,p+"output_linear.bias")->ne[0]);
+    auto r=execute(ctx,y,outdim*frames*batch,w.backend(),16384);
+    ggml_free(ctx);
+    return r;
 } catch(const std::exception&e){inputs.clear();return std::unexpected(e.what());}
 
 std::expected<std::vector<float>, std::string> run_two_stage_denoiser(
@@ -175,7 +199,8 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     const ggml_motion_weights &weights, std::span<const float> initial,
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float heading, std::size_t frames,
-    unsigned steps, float text_weight, float constraint_weight) {
+    unsigned steps, float text_weight, float constraint_weight,
+    bool project_observed) {
     if(initial.size()!=frames*weights.motion_dim() || observed.size()!=initial.size() || observed_mask.size()!=initial.size())
         return std::unexpected("invalid conditioned motion noise dimensions");
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
@@ -184,10 +209,25 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
         auto clean=run_separated_cfg_denoiser_conditioned(weights,state,embedding,observed,observed_mask,
                                                            float(schedule->use_timesteps[i]),heading,text_weight,constraint_weight,frames);
         if(!clean)return std::unexpected(clean.error());
+        // Pin the observed channels of the x0 prediction before stepping, so
+        // every step is taken from a state that already satisfies them.
+        // The mask is a weight, not a flag: a frame eased in at 0.4 is pulled
+        // four tenths of the way to its pinned value, so a hold can fade in
+        // instead of switching on between one frame and the next.
+        if(project_observed)
+            for(size_t k=0;k<clean->size();++k)
+                if(observed_mask[k]>0.F)
+                    (*clean)[k]=(*clean)[k]*(1.F-observed_mask[k])
+                                +observed[k]*observed_mask[k];
         auto stepped=ddim_step(*schedule,i,state.data(),clean->data(),next.data(),state.size());
         if(!stepped)return std::unexpected(stepped.error());
         state.swap(next);
     }
+    if(project_observed)
+        for(size_t k=0;k<state.size();++k)
+            if(observed_mask[k]>0.F)
+                state[k]=state[k]*(1.F-observed_mask[k])
+                         +observed[k]*observed_mask[k];
     return state;
 }
 }

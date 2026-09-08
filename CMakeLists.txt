@@ -56,6 +56,14 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
   target_compile_definitions(kmd-sample-fixture PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
   add_executable(kmd-generate src/generate.cpp)
   target_link_libraries(kmd-generate PRIVATE kimodo)
+  add_executable(kmd-constrain src/constrain.cpp)
+  target_sources(kmd-constrain PRIVATE
+    src/gguf.cpp src/ggml_weights.cpp src/denoiser.cpp src/diffusion.cpp
+    src/motion_rep.cpp src/motion_decode.cpp
+    src/llm_text_encoder.cpp src/llm_tokenizer.cpp)
+  target_include_directories(kmd-constrain PRIVATE src)
+  target_link_libraries(kmd-constrain PRIVATE ggml ${KIMODO_VK_LIBS})
+  target_compile_definitions(kmd-constrain PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
   add_executable(kmd-encode src/encode.cpp)
   target_sources(kmd-encode PRIVATE src/llm_text_encoder.cpp src/llm_tokenizer.cpp)
   target_include_directories(kmd-encode PRIVATE src)

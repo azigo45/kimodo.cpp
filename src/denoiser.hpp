@@ -57,11 +57,16 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
 // Multi-prompt transition sampler. `observed` and `observed_mask` are [T,motion_dim]
 // normalized motion-representation values/masks. This mirrors the upstream
 // concat-mask denoiser: text, constraint, and unconditional CFG branches.
+// `project_observed` forces every masked channel of the clean prediction back
+// onto its observed value at each step. Conditioning alone is a soft pull, so
+// a partial constraint drifts; projection makes the pinned channels rigid.
+// Defaults to off, which is the behaviour the transition path relies on.
 std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditioned(
     const ggml_motion_weights &weights, std::span<const float> initial_noise,
     std::span<const float> embedding, std::span<const float> observed,
     std::span<const float> observed_mask, float first_heading, std::size_t frames,
-    unsigned steps, float text_weight, float constraint_weight);
+    unsigned steps, float text_weight, float constraint_weight,
+    bool project_observed = false);
 
 // End-to-end upstream `_multiprompt` orchestration.  DDIM operates in
 // normalized motion space; the returned joined representation is raw so its
