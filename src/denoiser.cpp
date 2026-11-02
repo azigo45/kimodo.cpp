@@ -1,6 +1,7 @@
 // Modified by Alexander Antonov (AzRigTool), 2026: project_observed hard pinning,
 // fractional (weighted) observation masks, and one denoiser graph per step in
-// place of eighteen. Original: kimodo.cpp, Apache-2.0. See the fork's history.
+// place of eighteen, step progress on request (KIMODO_PROGRESS). Original: kimodo.cpp,
+// Apache-2.0. See the fork's history.
 #include "denoiser.hpp"
 #include "ggml_weights.hpp"
 #include "motion_rep.hpp"
@@ -12,6 +13,17 @@
 #include <ggml.h>
 #include <ggml-alloc.h>
 #include <ggml-backend.h>
+#include <cstdio>
+#include <cstdlib>
+
+// Only when the caller asks for it, so nothing else sees extra output.
+static void report_step(unsigned step, unsigned steps) {
+    static const bool wanted = std::getenv("KIMODO_PROGRESS") != nullptr;
+    if (!wanted) return;
+    std::fprintf(stderr, "kimodo-step %u %u\n", step, steps);
+    std::fflush(stderr);
+}
+
 
 namespace kimodo::detail {
 namespace {
@@ -189,6 +201,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise(
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());
     for(unsigned i=steps;i-->0;) {
+        report_step(steps-i,steps);
         auto clean=run_separated_cfg_denoiser(weights,state,embedding,float(schedule->use_timesteps[i]),text_weight,constraint_weight,frames);
         if(!clean)return std::unexpected(clean.error());
         auto stepped=ddim_step(*schedule,i,state.data(),clean->data(),next.data(),state.size());
@@ -209,6 +222,7 @@ std::expected<std::vector<float>, std::string> sample_motion_from_noise_conditio
     auto schedule=make_cosine_schedule(1000,steps); if(!schedule)return std::unexpected(schedule.error());
     std::vector<float> state(initial.begin(),initial.end()), next(state.size());
     for(unsigned i=steps;i-->0;) {
+        report_step(steps-i,steps);
         auto clean=run_separated_cfg_denoiser_conditioned(weights,state,embedding,observed,observed_mask,
                                                            float(schedule->use_timesteps[i]),heading,text_weight,constraint_weight,frames);
         if(!clean)return std::unexpected(clean.error());
