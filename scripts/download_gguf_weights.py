@@ -10,6 +10,9 @@ from huggingface_hub import hf_hub_download
 
 ORG = "LocalAI-io"
 TEXT_REPO_DEFAULT = f"{ORG}/Llama-3-Kimodo-GGML"
+# The last revision holding the split bundle this engine loads: main dropped it
+# on 2026-10-29 in favour of single-file weights.
+TEXT_REVISION_DEFAULT = "3e8d958803beaddb6011ac534f2be972e2710c7d"
 
 MODEL_MAP = {
     "soma-rp-v1.1": (f"{ORG}/Kimodo-SOMA-RP-v1.1-GGML", "models/kimodo-soma-rp-v1.1-f32.gguf"),
@@ -41,6 +44,7 @@ def download_and_verify(repo: str, revision: str, output_dir: Path, patterns: li
     if manifest.get("format") != "kimodo-gguf-manifest-v1":
         raise SystemExit(f"Unsupported or malformed manifest in {repo}")
 
+    matched = 0
     for entry in manifest.get("files", []):
         rel_path = entry.get("path", "")
         p = Path(rel_path)
@@ -61,6 +65,7 @@ def download_and_verify(repo: str, revision: str, output_dir: Path, patterns: li
         if not matches:
             continue
 
+        matched += 1
         print(f"Downloading {rel_path} from {repo}...")
         downloaded = hf_hub_download(
             repo_id=repo,
@@ -71,15 +76,26 @@ def download_and_verify(repo: str, revision: str, output_dir: Path, patterns: li
         print(f"Verifying {rel_path}...")
         verify_file(Path(downloaded), entry.get("bytes"), entry.get("sha256"))
 
+    if not matched:
+        raise SystemExit(f"The manifest of {repo} lists nothing for: {patterns}")
+
 def main():
     parser = argparse.ArgumentParser(description="Download kimodo.cpp GGUF weights")
     parser.add_argument("--output", default=".", help="Output directory root")
     parser.add_argument("--model", action="append", choices=list(MODEL_MAP.keys()), help="Model(s) to download")
     parser.add_argument("--motion-repo", help="Override motion repo")
     parser.add_argument("--text-repo", default=TEXT_REPO_DEFAULT, help="Text encoder repo")
-    parser.add_argument("--revision", default="main", help="Git revision")
+    parser.add_argument("--revision", help="Git revision (default: main, and a pinned one for the text bundle)")
     parser.add_argument("--motion-only", action="store_true", help="Download only motion weights, skip text bundle")
     args = parser.parse_args()
+
+    motion_revision = args.revision or "main"
+    if args.revision:
+        text_revision = args.revision
+    elif args.text_repo == TEXT_REPO_DEFAULT:
+        text_revision = TEXT_REVISION_DEFAULT
+    else:
+        text_revision = "main"
 
     models = args.model if args.model else ["soma-rp-v1.1"]
     output_path = Path(args.output).resolve()
@@ -89,11 +105,11 @@ def main():
         default_repo, default_file = MODEL_MAP[model]
         repo = args.motion_repo if args.motion_repo else default_repo
         print(f"--- Downloading Motion Model: {model} ({repo}) ---")
-        download_and_verify(repo, args.revision, output_path, [default_file])
+        download_and_verify(repo, motion_revision, output_path, [default_file])
 
     if not args.motion_only:
         print(f"--- Downloading Text Encoder Bundle ({args.text_repo}) ---")
-        download_and_verify(args.text_repo, args.revision, output_path, ["generated/llm2vec-text-bundle/*"])
+        download_and_verify(args.text_repo, text_revision, output_path, ["generated/llm2vec-text-bundle/*"])
 
     print("\nAll requested Kimodo GGUF models downloaded and verified successfully!")
 

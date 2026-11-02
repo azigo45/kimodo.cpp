@@ -5,6 +5,9 @@ export HF_HUB_DISABLE_PROGRESS_BARS=1
 
 ORG="${GGUF_ORG:-LocalAI-io}"
 TEXT_REPO_DEFAULT="$ORG/Llama-3-Kimodo-GGML"
+# The last revision holding the split bundle this engine loads: main dropped it
+# on 2026-10-29 in favour of single-file weights.
+TEXT_REVISION_DEFAULT="3e8d958803beaddb6011ac534f2be972e2710c7d"
 
 usage() {
     printf '%s\n' "usage: $0 --output DIR [--model MODEL]... [--motion-repo HF_REPO] [--text-repo HF_REPO] [--revision REVISION] [--motion-only]" >&2
@@ -12,14 +15,14 @@ usage() {
     exit 2
 }
 
-output='' motion_repo_override='' text_repo="$TEXT_REPO_DEFAULT" revision='main' motion_only=0 models=()
+output='' motion_repo_override='' text_repo="$TEXT_REPO_DEFAULT" text_revision="$TEXT_REVISION_DEFAULT" revision='main' motion_only=0 models=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output) [ "$#" -ge 2 ] || usage; output=$2; shift 2 ;;
         --model) [ "$#" -ge 2 ] || usage; models+=("$2"); shift 2 ;;
         --motion-repo) [ "$#" -ge 2 ] || usage; motion_repo_override=$2; shift 2 ;;
-        --text-repo) [ "$#" -ge 2 ] || usage; text_repo=$2; shift 2 ;;
-        --revision) [ "$#" -ge 2 ] || usage; revision=$2; shift 2 ;;
+        --text-repo) [ "$#" -ge 2 ] || usage; text_repo=$2; text_revision=$revision; shift 2 ;;
+        --revision) [ "$#" -ge 2 ] || usage; revision=$2; text_revision=$2; shift 2 ;;
         --motion-only) motion_only=1; shift ;;
         *) usage ;;
     esac
@@ -54,12 +57,14 @@ manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if manifest.get("format") != "kimodo-gguf-manifest-v1":
     raise SystemExit("unsupported or malformed GGUF manifest")
 requested = sys.argv[3:]
+matched = 0
 for entry in manifest.get("files", []):
     relative = Path(entry.get("path", ""))
     if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".gguf":
         raise SystemExit(f"unsafe manifest path: {relative}")
     if not any(relative.match(pattern) for pattern in requested):
         continue
+    matched += 1
     path = root / relative
     if not path.is_file() or path.stat().st_size != entry.get("bytes"):
         raise SystemExit(f"missing or wrong-sized file: {relative}")
@@ -69,6 +74,8 @@ for entry in manifest.get("files", []):
             h.update(chunk)
     if h.hexdigest() != entry.get("sha256"):
         raise SystemExit(f"checksum mismatch: {relative}")
+if not matched:
+    raise SystemExit(f"the manifest lists nothing for: {requested}")
 print("verified native Kimodo GGUF bundle")
 PY
 }
@@ -85,5 +92,6 @@ for model in "${models[@]}"; do
     download_and_verify "$motion_repo" "$motion_file"
 done
 if [ "$motion_only" -eq 0 ]; then
+    revision=$text_revision
     download_and_verify "$text_repo" "generated/llm2vec-text-bundle/*"
 fi
